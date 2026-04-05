@@ -1,0 +1,54 @@
+name: proximeeet_app
+description: "ProxiMeet - Proximity networking for conferences"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # Firebase
+  firebase_core: ^3.13.0
+  firebase_auth: ^5.5.2
+  cloud_firestore: ^5.6.6
+  firebase_storage: ^12.4.5
+  firebase_messaging: ^15.2.5
+
+  #permessi
+  permission_handler: ^11.3.1
+
+  # BLE
+  flutter_blue_plus: ^1.35.3
+
+  # QR
+  mobile_scanner: ^7.0.0
+  qr_flutter: ^4.1.0
+
+  # Auth providers
+  google_sign_in: ^6.2.2
+
+  # Storage locale wallet offline
+  hive_flutter: ^1.1.0
+
+  # Immagini
+  cached_network_image: ^3.4.1
+  image_picker: ^1.1.2
+  animated_text_kit: ^4.2.3
+
+  # Utility
+  intl: ^0.20.2
+  uuid: ^4.5.1
+  crypto: ^3.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
