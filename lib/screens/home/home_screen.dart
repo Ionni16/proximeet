@@ -9,6 +9,9 @@ import 'dart:async';
 import '../../services/firestore_service.dart';
 import '../../models/connection_model.dart';
 import 'requests_screen.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import '../../services/storage_service.dart';
+import '../profile/edit_profile_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -34,6 +37,14 @@ class _HomeScreenState extends State<HomeScreen> {
     if (uid == null) return;
     final user = await _authService.getUserProfile(uid);
     setState(() => _currentUser = user);
+    
+
+    // Salva token FCM per le notifiche push
+    await _authService.saveFcmToken();
+    // Scrivi presenza su Firestore
+    if (user != null) {
+      await FirestoreService.shared.updatePresence(uid, user.bleId);
+    }
 
     if (user != null && _trackingEnabled) {
       // 1. Controlla se Bluetooth è acceso
@@ -177,7 +188,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           _RadarTab(currentUser: _currentUser),
           _WalletTab(),
-          _ProfileTab(currentUser: _currentUser),
+          const _ProfileTab(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -248,24 +259,37 @@ class _RadarTabState extends State<_RadarTab>
   }
 
   void _startListeningDetections() {
-    final bleId = widget.currentUser!.bleId;
-    _detectionSubscription = BleService.shared
-        .listenToMyDetections(bleId)
-        .listen((uids) async {
-      for (final uid in uids) {
-        // Carica profilo utente rilevato
-        final db = FirebaseFirestore.instance;
-        final docs = await db
-            .collection('users')
-            .where('uid', isEqualTo: uid)
-            .limit(1)
-            .get();
+    final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-        if (docs.docs.isNotEmpty) {
-          final user = UserModel.fromMap(docs.docs.first.data());
-          _onUserDetected(user.bleId, -65, userModel: user);
+    _detectionSubscription = FirestoreService.shared
+        .listenToNearbyUsers(myUid)
+        .listen((users) {
+      setState(() {
+        for (final user in users) {
+          final existing = _nearbyUsers.indexWhere(
+            (u) => u.bleId == user.bleId,
+          );
+          if (existing >= 0) {
+            _nearbyUsers[existing] = _NearbyUser(
+              bleId: user.bleId,
+              rssi: -65,
+              lastSeen: DateTime.now(),
+              user: user,
+            );
+          } else {
+            _nearbyUsers.add(_NearbyUser(
+              bleId: user.bleId,
+              rssi: -65,
+              lastSeen: DateTime.now(),
+              user: user,
+            ));
+          }
         }
-      }
+        // Rimuovi chi non è più nella lista
+        _nearbyUsers.removeWhere(
+          (nearby) => !users.any((u) => u.bleId == nearby.bleId),
+        );
+      });
     });
   }
 
@@ -297,9 +321,12 @@ class _RadarTabState extends State<_RadarTab>
 
   @override
   void dispose() {
-    _radarController.dispose();
-    _detectionSubscription?.cancel();
-    BleService.shared.onUserDetected = null;
+    BleService.shared.stopAll();
+    // Rimuovi presenza
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null) {
+      FirestoreService.shared.removePresence(uid);
+    }
     super.dispose();
   }
 
@@ -1032,16 +1059,68 @@ class _DetailRow extends StatelessWidget {
 
 // ── TAB PROFILO ────────────────────────────────────────────
 class _ProfileTab extends StatelessWidget {
-  final UserModel? currentUser;
-  const _ProfileTab({this.currentUser});
+  const _ProfileTab({super.key}) : super();
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return const Center(child: CircularProgressIndicator());
+
+    // StreamBuilder diretto su Firestore — aggiornamento in tempo reale
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        final data = snapshot.data!.data() as Map<String, dynamic>?;
+        if (data == null) return const Center(child: Text('Profilo non trovato'));
+        final user = UserModel.fromMap(data);
+        return _ProfileContent(user: user);
+      },
+    );
+  }
+}
+
+class _ProfileContent extends StatefulWidget {
+  final UserModel user;
+  const _ProfileContent({required this.user});
+
+  @override
+  State<_ProfileContent> createState() => _ProfileContentState();
+}
+
+class _ProfileContentState extends State<_ProfileContent> {
+  bool _uploadingPhoto = false;
+
+  Future<void> _changePhoto() async {
+    final file = await StorageService.shared.pickImage();
+    if (file == null) return;
+    setState(() => _uploadingPhoto = true);
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) return;
+      final url = await StorageService.shared.uploadAvatar(uid, file);
+      if (url != null) {
+        await AuthService().updateAvatar(uid, url);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Foto aggiornata!')),
+          );
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
-    if (currentUser == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
+    final user = widget.user;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
@@ -1049,73 +1128,150 @@ class _ProfileTab extends StatelessWidget {
         children: [
           const SizedBox(height: 20),
 
-          // Avatar
-          Container(
-            width: 96,
-            height: 96,
-            decoration: BoxDecoration(
-              color: theme.colorScheme.primaryContainer,
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: Text(
-                currentUser!.firstName[0].toUpperCase(),
-                style: TextStyle(
-                  fontSize: 40,
-                  fontWeight: FontWeight.bold,
-                  color: theme.colorScheme.primary,
+          // Avatar con bottone modifica
+          Stack(
+            children: [
+              GestureDetector(
+                onTap: _changePhoto,
+                child: Container(
+                  width: 100,
+                  height: 100,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: theme.colorScheme.primary,
+                      width: 2.5,
+                    ),
+                  ),
+                  child: ClipOval(
+                    child: _uploadingPhoto
+                        ? const Center(child: CircularProgressIndicator())
+                        : user.avatarURL.isNotEmpty
+                            ? Image.network(
+                                user.avatarURL,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => _initial(user, theme),
+                              )
+                            : _initial(user, theme),
+                  ),
                 ),
               ),
-            ),
+              Positioned(
+                bottom: 0,
+                right: 0,
+                child: Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                        color: theme.colorScheme.surface, width: 2),
+                  ),
+                  child: Icon(Icons.camera_alt,
+                      size: 14, color: theme.colorScheme.onPrimary),
+                ),
+              ),
+            ],
           ),
 
           const SizedBox(height: 16),
 
           Text(
-            currentUser!.fullName,
-            style: theme.textTheme.headlineSmall?.copyWith(
-              fontWeight: FontWeight.bold,
-            ),
+            user.fullName,
+            style: theme.textTheme.headlineSmall
+                ?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 4),
           Text(
-            '${currentUser!.role} · ${currentUser!.company}',
+            '${user.role} · ${user.company}',
             style: theme.textTheme.bodyLarge?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
 
+          const SizedBox(height: 12),
+
+          // Bottoni azione
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                icon: const Icon(Icons.qr_code, size: 18),
+                label: const Text('Mostra QR'),
+                onPressed: () => _showQrCode(context, user),
+                style: OutlinedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                label: const Text('Modifica'),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => EditProfileScreen(user: user),
+                    ),
+                  );
+                },
+                style: OutlinedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20)),
+                ),
+              ),
+            ],
+          ),
+
           const SizedBox(height: 24),
 
-          // Info cards
+          _SectionHeader(title: 'Contatti'),
           _InfoCard(
-            icon: Icons.email_outlined,
-            label: 'Email',
-            value: currentUser!.email,
-          ),
-          if (currentUser!.phone != null && currentUser!.phone!.isNotEmpty)
+              icon: Icons.email_outlined, label: 'Email', value: user.email),
+          if (user.phone != null && user.phone!.isNotEmpty)
             _InfoCard(
-              icon: Icons.phone_outlined,
-              label: 'Telefono',
-              value: currentUser!.phone!,
-            ),
-          if (currentUser!.linkedin != null &&
-              currentUser!.linkedin!.isNotEmpty)
-            _InfoCard(
-              icon: Icons.link_outlined,
-              label: 'LinkedIn',
-              value: currentUser!.linkedin!,
-            ),
-          if (currentUser!.bio != null && currentUser!.bio!.isNotEmpty)
-            _InfoCard(
-              icon: Icons.notes_outlined,
-              label: 'Bio',
-              value: currentUser!.bio!,
-            ),
+                icon: Icons.phone_outlined,
+                label: 'Telefono',
+                value: user.phone!),
 
-          const SizedBox(height: 16),
+          if (user.linkedin != null && user.linkedin!.isNotEmpty) ...[
+            _SectionHeader(title: 'Social'),
+            _InfoCard(
+                icon: Icons.link_outlined,
+                label: 'LinkedIn',
+                value: user.linkedin!),
+          ],
+          if (user.github != null && user.github!.isNotEmpty)
+            _InfoCard(
+                icon: Icons.code_outlined,
+                label: 'GitHub',
+                value: user.github!),
+          if (user.twitter != null && user.twitter!.isNotEmpty)
+            _InfoCard(
+                icon: Icons.alternate_email,
+                label: 'Twitter / X',
+                value: user.twitter!),
 
-          // BLE ID
+          if (user.bio != null && user.bio!.isNotEmpty) ...[
+            _SectionHeader(title: 'Bio'),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: Text(user.bio!,
+                  style: const TextStyle(fontSize: 14, height: 1.5)),
+            ),
+          ],
+
+          const SizedBox(height: 8),
+          _SectionHeader(title: 'Informazioni app'),
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -1127,25 +1283,150 @@ class _ProfileTab extends StatelessWidget {
                 Icon(Icons.bluetooth,
                     color: theme.colorScheme.primary, size: 18),
                 const SizedBox(width: 8),
-                Text(
-                  'BLE ID: ',
-                  style: TextStyle(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontSize: 12,
-                  ),
-                ),
-                Text(
-                  currentUser!.bleId,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    fontWeight: FontWeight.bold,
+                Text('BLE ID: ',
+                    style: TextStyle(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 12)),
+                Expanded(
+                  child: Text(
+                    user.bleId,
+                    style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],
             ),
           ),
+
+          const SizedBox(height: 32),
+
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.logout),
+              label: const Text('Esci'),
+              onPressed: () async {
+                await BleService.shared.stopAll();
+                await AuthService().logout();
+              },
+              style: OutlinedButton.styleFrom(
+                foregroundColor: theme.colorScheme.error,
+                side: BorderSide(color: theme.colorScheme.error),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
         ],
+      ),
+    );
+  }
+
+  Widget _initial(UserModel user, ThemeData theme) {
+    return Center(
+      child: Text(
+        user.firstName[0].toUpperCase(),
+        style: TextStyle(
+          fontSize: 42,
+          fontWeight: FontWeight.bold,
+          color: theme.colorScheme.primary,
+        ),
+      ),
+    );
+  }
+
+  // QR risolto — isScrollControlled + SingleChildScrollView
+  void _showQrCode(BuildContext context, UserModel user) {
+    final theme = Theme.of(context);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => SingleChildScrollView(
+        padding: EdgeInsets.only(
+          left: 32,
+          right: 32,
+          top: 32,
+          bottom: MediaQuery.of(ctx).viewInsets.bottom + 32,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.outlineVariant,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Il tuo QR ProxiMeet',
+              style: theme.textTheme.titleLarge
+                  ?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Mostralo a qualcuno per scambiare il biglietto',
+              style:
+                  TextStyle(color: theme.colorScheme.onSurfaceVariant),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              padding: const EdgeInsets.all(16),
+              child: QrImageView(
+                data: 'proximeet://user/${user.uid}',
+                version: QrVersions.auto,
+                size: 200,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(user.fullName,
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(
+              '${user.role} · ${user.company}',
+              style:
+                  TextStyle(color: theme.colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 32),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  const _SectionHeader({required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8, top: 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          title.toUpperCase(),
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 1.2,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
       ),
     );
   }

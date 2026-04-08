@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../models/user_model.dart';
 import '../models/connection_model.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class FirestoreService {
   static final FirestoreService shared = FirestoreService._();
@@ -135,5 +136,43 @@ class FirestoreService {
 
     if (!doc.exists) return null;
     return doc.data()?['status'] as String?;
+  }
+
+  // Scrivi presenza quando l'app è aperta
+  Future<void> updatePresence(String uid, String bleId) async {
+    await _db.collection('presence').doc(uid).set({
+      'uid': uid,
+      'bleId': bleId,
+      'lastSeen': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // Cancella presenza quando esci
+  Future<void> removePresence(String uid) async {
+    await _db.collection('presence').doc(uid).delete();
+  }
+
+  // Ascolta utenti presenti negli ultimi 5 minuti
+  Stream<List<UserModel>> listenToNearbyUsers(String myUid) {
+    final fiveMinAgo = Timestamp.fromDate(
+      DateTime.now().subtract(const Duration(minutes: 5)),
+    );
+
+    return _db
+        .collection('presence')
+        .where('lastSeen', isGreaterThan: fiveMinAgo)
+        .snapshots()
+        .asyncMap((snap) async {
+      final List<UserModel> users = [];
+      for (final doc in snap.docs) {
+        final uid = doc.data()['uid'] as String;
+        if (uid == myUid) continue;
+        final userDoc = await _db.collection('users').doc(uid).get();
+        if (userDoc.exists) {
+          users.add(UserModel.fromMap(userDoc.data()!));
+        }
+      }
+      return users;
+    });
   }
 }
