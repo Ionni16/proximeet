@@ -2,6 +2,34 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- BLE: scan + advertising -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>ProxiMeet usa il Bluetooth per rilevare le persone vicine durante gli eventi</string>
+
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>ProxiMeet trasmette il tuo identificativo via Bluetooth per farti trovare dalle persone vicine</string>
+
+	<!-- Location (richiesto da BLE su alcune versioni iOS) -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>ProxiMeet usa la posizione per migliorare la rilevazione delle persone vicine</string>
+
+	<!-- Camera per QR scanner -->
+	<key>NSCameraUsageDescription</key>
+	<string>ProxiMeet usa la fotocamera per scansionare i QR code dei contatti</string>
+
+	<!-- Galleria per avatar -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ProxiMeet accede alla galleria per impostare la tua foto profilo</string>
+
+	<!-- (OPZIONALE) Background BLE - per futuro supporto background -->
+	<!-- Decommenta se vuoi abilitare scanning in background -->
+	<!--
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+	</array>
+	-->
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
