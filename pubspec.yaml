@@ -21,6 +21,7 @@ dependencies:
 
   #permessi
   permission_handler: ^11.3.1
+  device_info_plus: ^10.1.0
 
   # BLE
   flutter_blue_plus: ^1.35.3
