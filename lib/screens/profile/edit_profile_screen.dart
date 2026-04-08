@@ -135,10 +135,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Text(
-                    'Salva',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
+                : const Text('Salva',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
           ),
         ],
       ),
@@ -157,8 +155,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       controller: _firstNameController,
                       label: 'Nome',
                       icon: Icons.person_outlined,
-                      validator: (v) =>
-                          v!.isEmpty ? 'Obbligatorio' : null,
+                      validator: (v) => v!.isEmpty ? 'Obbligatorio' : null,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -167,8 +164,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       controller: _lastNameController,
                       label: 'Cognome',
                       icon: Icons.person_outlined,
-                      validator: (v) =>
-                          v!.isEmpty ? 'Obbligatorio' : null,
+                      validator: (v) => v!.isEmpty ? 'Obbligatorio' : null,
                     ),
                   ),
                 ],
@@ -228,8 +224,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   onPressed: _loading ? null : _save,
                   style: FilledButton.styleFrom(
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                   child: _loading
                       ? const CircularProgressIndicator(color: Colors.white)

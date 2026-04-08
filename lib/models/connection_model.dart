@@ -2,6 +2,7 @@ class ConnectionRequest {
   final String id;
   final String senderUid;
   final String receiverUid;
+  final String eventId;
   final String status;
   final DateTime? createdAt;
 
@@ -9,6 +10,7 @@ class ConnectionRequest {
     required this.id,
     required this.senderUid,
     required this.receiverUid,
+    required this.eventId,
     required this.status,
     this.createdAt,
   });
@@ -18,6 +20,7 @@ class ConnectionRequest {
       id: id,
       senderUid: map['senderUid'] ?? '',
       receiverUid: map['receiverUid'] ?? '',
+      eventId: map['eventId'] ?? '',
       status: map['status'] ?? 'pending',
       createdAt: map['createdAt']?.toDate(),
     );
@@ -35,6 +38,7 @@ class WalletContact {
   final String linkedin;
   final String avatarURL;
   final DateTime? connectedAt;
+  final String eventName;
   final String note;
 
   WalletContact({
@@ -48,6 +52,7 @@ class WalletContact {
     required this.linkedin,
     required this.avatarURL,
     this.connectedAt,
+    this.eventName = '',
     required this.note,
   });
 
@@ -65,6 +70,7 @@ class WalletContact {
       linkedin: map['linkedin'] ?? '',
       avatarURL: map['avatarURL'] ?? '',
       connectedAt: map['connectedAt']?.toDate(),
+      eventName: map['eventName'] ?? '',
       note: map['note'] ?? '',
     );
   }

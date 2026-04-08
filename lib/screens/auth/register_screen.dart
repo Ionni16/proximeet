@@ -100,11 +100,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
         ),
         suffixIcon: onToggleObscure != null
             ? IconButton(
-                icon: Icon(
-                  obscure
-                      ? Icons.visibility_outlined
-                      : Icons.visibility_off_outlined,
-                ),
+                icon: Icon(obscure
+                    ? Icons.visibility_outlined
+                    : Icons.visibility_off_outlined),
                 onPressed: onToggleObscure,
               )
             : null,
@@ -114,7 +112,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   List<Step> get _steps => [
-        // Step 1 — Dati personali
         Step(
           title: const Text('Profilo'),
           isActive: _currentStep >= 0,
@@ -184,8 +181,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
             ],
           ),
         ),
-
-        // Step 2 — Credenziali
         Step(
           title: const Text('Account'),
           isActive: _currentStep >= 1,
@@ -261,12 +256,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       children: [
                         if (_currentStep < _steps.length - 1)
                           FilledButton(
-                            onPressed: () =>
-                                setState(() => _currentStep++),
+                            onPressed: () => setState(() => _currentStep++),
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
+                                  borderRadius: BorderRadius.circular(10)),
                             ),
                             child: const Text('Avanti'),
                           ),
@@ -275,25 +268,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             onPressed: _loading ? null : _register,
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10),
-                              ),
+                                  borderRadius: BorderRadius.circular(10)),
                             ),
                             child: _loading
                                 ? const SizedBox(
                                     width: 20,
                                     height: 20,
                                     child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white,
-                                    ),
+                                        strokeWidth: 2, color: Colors.white),
                                   )
                                 : const Text('Registrati'),
                           ),
                         if (_currentStep > 0) ...[
                           const SizedBox(width: 12),
                           TextButton(
-                            onPressed: () =>
-                                setState(() => _currentStep--),
+                            onPressed: () => setState(() => _currentStep--),
                             child: const Text('Indietro'),
                           ),
                         ],
@@ -304,8 +293,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 steps: _steps,
               ),
             ),
-
-            // Errore
             if (_errorMessage != null)
               Container(
                 margin: const EdgeInsets.all(16),
@@ -320,10 +307,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         color: theme.colorScheme.error, size: 18),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        _errorMessage!,
-                        style: TextStyle(color: theme.colorScheme.error),
-                      ),
+                      child: Text(_errorMessage!,
+                          style: TextStyle(color: theme.colorScheme.error)),
                     ),
                   ],
                 ),

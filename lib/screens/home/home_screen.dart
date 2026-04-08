@@ -1,125 +1,65 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../../services/auth_service.dart';
-import '../../services/ble_service.dart';
-import '../../models/user_model.dart';
-import 'dart:math' show cos, sin;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:math' show cos, sin;
 import 'dart:async';
-import '../../services/firestore_service.dart';
-import '../../models/connection_model.dart';
-import 'requests_screen.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+
+import '../../models/user_model.dart';
+import '../../models/nearby_user.dart';
+import '../../models/connection_model.dart';
+import '../../services/auth_service.dart';
+import '../../services/event_session_service.dart';
+import '../../services/nearby_detection_service.dart';
+import '../../services/firestore_service.dart';
 import '../../services/storage_service.dart';
 import '../profile/edit_profile_screen.dart';
+import 'requests_screen.dart';
 
+/// Schermata principale durante un evento.
+/// Riceve [eventId], [eventName] e [currentUser] dal navigator.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final String eventId;
+  final String eventName;
+  final UserModel currentUser;
+
+  const HomeScreen({
+    super.key,
+    required this.eventId,
+    required this.eventName,
+    required this.currentUser,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final _authService = AuthService();
-  UserModel? _currentUser;
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _selectedIndex = 0;
-  bool _trackingEnabled = true;
 
   @override
   void initState() {
     super.initState();
-    _loadUser();
-  }
-
-  Future<void> _loadUser() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return;
-    final user = await _authService.getUserProfile(uid);
-    setState(() => _currentUser = user);
-    
-
-    // Salva token FCM per le notifiche push
-    await _authService.saveFcmToken();
-    // Scrivi presenza su Firestore
-    if (user != null) {
-      await FirestoreService.shared.updatePresence(uid, user.bleId);
-    }
-
-    if (user != null && _trackingEnabled) {
-      // 1. Controlla se Bluetooth è acceso
-      final btOn = await BleService.shared.isBluetoothOn();
-      if (!btOn) {
-        if (mounted) {
-          final confirm = await showDialog<bool>(
-            context: context,
-            barrierDismissible: false,
-            builder: (ctx) => AlertDialog(
-              icon: const Icon(Icons.bluetooth_disabled, size: 40),
-              title: const Text('Bluetooth spento'),
-              content: const Text(
-                'ProxiMeet ha bisogno del Bluetooth per rilevare '
-                'le persone vicine. Vuoi attivarlo?',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Non ora'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Attiva'),
-                ),
-              ],
-            ),
-          );
-
-          if (confirm == true) {
-            await BleService.shared.turnOnBluetooth();
-            await Future.delayed(const Duration(seconds: 2));
-          } else {
-            return;
-          }
-        }
-      }
-
-      // 2. Richiedi permessi
-      final granted = await BleService.shared.requestPermissions();
-      if (!granted) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Permessi Bluetooth negati — '
-                'ProxiMeet non può rilevare utenti vicini',
-              ),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-        return;
-      }
-
-      // 3. Avvia BLE
-      await BleService.shared.startScanning(user.bleId);
-      await BleService.shared.startAdvertising(user.bleId);
-    }
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
-    BleService.shared.stopAll();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  void _toggleTracking() async {
-    setState(() => _trackingEnabled = !_trackingEnabled);
-    if (_trackingEnabled && _currentUser != null) {
-      await BleService.shared.startScanning(_currentUser!.bleId);
-      await BleService.shared.startAdvertising(_currentUser!.bleId);
-    } else {
-      await BleService.shared.stopAll();
+  /// Lifecycle: se l'app va in background/detached, tenta cleanup.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      EventSessionService.shared.leaveEvent();
     }
+  }
+
+  Future<void> _leaveEvent() async {
+    await EventSessionService.shared.leaveEvent();
+    if (mounted) Navigator.pop(context);
   }
 
   @override
@@ -128,67 +68,64 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Row(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          tooltip: 'Esci dall\'evento',
+          onPressed: _leaveEvent,
+        ),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.wifi_tethering,
-                color: theme.colorScheme.primary, size: 24),
-            const SizedBox(width: 8),
             const Text('ProxiMeet',
-                style: TextStyle(fontWeight: FontWeight.bold)),
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Text(
+              widget.eventName,
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
           ],
         ),
         actions: [
-        // Richieste in arrivo — AGGIUNGI QUESTO
-        StreamBuilder<List<ConnectionRequest>>(
-          stream: FirestoreService.shared.listenToIncomingRequests(),
-          builder: (context, snapshot) {
-            final count = snapshot.data?.length ?? 0;
-            return IconButton(
-              icon: Badge(
-                isLabelVisible: count > 0,
-                label: Text('$count'),
-                child: const Icon(Icons.notifications_outlined),
-              ),
-              tooltip: 'Richieste',
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const RequestsScreen(),
-                  ),
-                );
-              },
-            );
-          },
-        ),
-        // Tracking — già esistente
-        IconButton(
-          icon: Icon(
-            _trackingEnabled ? Icons.sensors : Icons.sensors_off,
-            color: _trackingEnabled
-                ? theme.colorScheme.primary
-                : theme.colorScheme.onSurfaceVariant,
+          // Richieste in arrivo
+          StreamBuilder<List<ConnectionRequest>>(
+            stream: FirestoreService.shared.listenToIncomingRequests(),
+            builder: (context, snapshot) {
+              final count = snapshot.data?.length ?? 0;
+              return IconButton(
+                icon: Badge(
+                  isLabelVisible: count > 0,
+                  label: Text('$count'),
+                  child: const Icon(Icons.notifications_outlined),
+                ),
+                tooltip: 'Richieste',
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const RequestsScreen(),
+                    ),
+                  );
+                },
+              );
+            },
           ),
-          tooltip: _trackingEnabled ? 'Tracking ON' : 'Tracking OFF',
-          onPressed: _toggleTracking,
-        ),
-        // Logout — già esistente
-        IconButton(
-          icon: const Icon(Icons.logout),
-          tooltip: 'Esci',
-          onPressed: () async {
-            await BleService.shared.stopAll();
-            await _authService.logout();
-          },
-        ),
-      ],
+
+          // Esci dall'evento
+          IconButton(
+            icon: const Icon(Icons.exit_to_app),
+            tooltip: 'Esci dall\'evento',
+            onPressed: _leaveEvent,
+          ),
+        ],
       ),
       body: IndexedStack(
         index: _selectedIndex,
         children: [
-          _RadarTab(currentUser: _currentUser),
-          _WalletTab(),
-          const _ProfileTab(),
+          _RadarTab(currentUser: widget.currentUser),
+          const _WalletTab(),
+          _ProfileTab(currentUser: widget.currentUser),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -218,8 +155,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
 // ── TAB RADAR ──────────────────────────────────────────────
 class _RadarTab extends StatefulWidget {
-  final UserModel? currentUser;
-  const _RadarTab({this.currentUser});
+  final UserModel currentUser;
+  const _RadarTab({required this.currentUser});
 
   @override
   State<_RadarTab> createState() => _RadarTabState();
@@ -229,14 +166,13 @@ class _RadarTabState extends State<_RadarTab>
     with SingleTickerProviderStateMixin {
   late AnimationController _radarController;
   late Animation<double> _radarAnimation;
-  final List<_NearbyUser> _nearbyUsers = [];
-  StreamSubscription? _detectionSubscription;
+  List<NearbyUser> _nearbyUsers = [];
+  StreamSubscription? _nearbySub;
 
   @override
   void initState() {
     super.initState();
 
-    // Animazione rotazione radar
     _radarController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
@@ -247,103 +183,18 @@ class _RadarTabState extends State<_RadarTab>
       end: 2 * 3.14159,
     ).animate(_radarController);
 
-    // Ascolta rilevazioni BLE
-    BleService.shared.onUserDetected = (bleId, rssi) {
-      _onUserDetected(bleId, rssi);
-    };
-
-    // Ascolta Firestore per utenti che ci hanno rilevato
-    if (widget.currentUser != null) {
-      _startListeningDetections();
-    }
-  }
-
-  void _startListeningDetections() {
-    final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-
-    _detectionSubscription = FirestoreService.shared
-        .listenToNearbyUsers(myUid)
-        .listen((users) {
-      setState(() {
-        for (final user in users) {
-          final existing = _nearbyUsers.indexWhere(
-            (u) => u.bleId == user.bleId,
-          );
-          if (existing >= 0) {
-            _nearbyUsers[existing] = _NearbyUser(
-              bleId: user.bleId,
-              rssi: -65,
-              lastSeen: DateTime.now(),
-              user: user,
-            );
-          } else {
-            _nearbyUsers.add(_NearbyUser(
-              bleId: user.bleId,
-              rssi: -65,
-              lastSeen: DateTime.now(),
-              user: user,
-            ));
-          }
-        }
-        // Rimuovi chi non è più nella lista
-        _nearbyUsers.removeWhere(
-          (nearby) => !users.any((u) => u.bleId == nearby.bleId),
-        );
-      });
-    });
-  }
-
-  void _onUserDetected(String bleId, int rssi, {UserModel? userModel}) {
-    setState(() {
-      final existing = _nearbyUsers.indexWhere((u) => u.bleId == bleId);
-      if (existing >= 0) {
-        _nearbyUsers[existing] = _NearbyUser(
-          bleId: bleId,
-          rssi: rssi,
-          lastSeen: DateTime.now(),
-          user: userModel ?? _nearbyUsers[existing].user,
-        );
-      } else {
-        _nearbyUsers.add(_NearbyUser(
-          bleId: bleId,
-          rssi: rssi,
-          lastSeen: DateTime.now(),
-          user: userModel,
-        ));
-      }
-
-      // Rimuovi utenti non visti da più di 5 minuti
-      _nearbyUsers.removeWhere(
-        (u) => DateTime.now().difference(u.lastSeen).inMinutes > 5,
-      );
+    // Ascolta NearbyDetectionService — la UNICA sorgente di verità
+    _nearbySub =
+        NearbyDetectionService.shared.nearbyStream.listen((users) {
+      if (mounted) setState(() => _nearbyUsers = users);
     });
   }
 
   @override
   void dispose() {
-    BleService.shared.stopAll();
-    // Rimuovi presenza
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid != null) {
-      FirestoreService.shared.removePresence(uid);
-    }
+    _radarController.dispose();
+    _nearbySub?.cancel();
     super.dispose();
-  }
-
-  // Converte RSSI in distanza approssimativa
-  String _rssiToDistance(int rssi) {
-    if (rssi >= -50) return 'Vicinissimo';
-    if (rssi >= -65) return 'Vicino';
-    if (rssi >= -80) return 'Medio';
-    return 'Lontano';
-  }
-
-  // Posizione utente sul radar in base a RSSI
-  double _rssiToRadius(int rssi, double maxRadius) {
-    if (rssi >= -50) return maxRadius * 0.25;
-    if (rssi >= -65) return maxRadius * 0.5;
-    if (rssi >= -80) return maxRadius * 0.75;
-    return maxRadius * 0.9;
   }
 
   @override
@@ -368,7 +219,7 @@ class _RadarTabState extends State<_RadarTab>
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
-                      // Cerchi radar statici
+                      // Cerchi radar
                       for (final fraction in [1.0, 0.75, 0.5, 0.25])
                         Container(
                           width: size * fraction,
@@ -383,19 +234,17 @@ class _RadarTabState extends State<_RadarTab>
                           ),
                         ),
 
-                      // Linee a croce
+                      // Croce
                       Container(
-                        width: size,
-                        height: 1,
-                        color:
-                            theme.colorScheme.primary.withOpacity(0.1),
-                      ),
+                          width: size,
+                          height: 1,
+                          color:
+                              theme.colorScheme.primary.withOpacity(0.1)),
                       Container(
-                        width: 1,
-                        height: size,
-                        color:
-                            theme.colorScheme.primary.withOpacity(0.1),
-                      ),
+                          width: 1,
+                          height: size,
+                          color:
+                              theme.colorScheme.primary.withOpacity(0.1)),
 
                       // Sweep animato
                       AnimatedBuilder(
@@ -411,13 +260,13 @@ class _RadarTabState extends State<_RadarTab>
                         },
                       ),
 
-                      // Utenti rilevati
+                      // Utenti nearby — posizionati in base a RSSI
                       ..._nearbyUsers.asMap().entries.map((entry) {
                         final i = entry.key;
                         final nearby = entry.value;
                         final angle = (i * 2.4) % (2 * 3.14159);
-                        final radius = _rssiToRadius(
-                            nearby.rssi, maxRadius * 0.85);
+                        final radius =
+                            nearby.radarRadius * maxRadius * 0.85;
                         final x = radius * cos(angle);
                         final y = radius * sin(angle);
 
@@ -425,12 +274,8 @@ class _RadarTabState extends State<_RadarTab>
                           left: maxRadius + x - 24,
                           top: maxRadius + y - 24,
                           child: GestureDetector(
-                            onTap: () =>
-                                _showUserCard(context, nearby),
-                            child: _UserDot(
-                              user: nearby.user,
-                              rssi: nearby.rssi,
-                            ),
+                            onTap: () => _showUserCard(context, nearby),
+                            child: _UserDot(nearby: nearby),
                           ),
                         );
                       }),
@@ -449,9 +294,7 @@ class _RadarTabState extends State<_RadarTab>
                         ),
                         child: Center(
                           child: Text(
-                            widget.currentUser?.firstName[0]
-                                    .toUpperCase() ??
-                                '?',
+                            widget.currentUser.firstName[0].toUpperCase(),
                             style: TextStyle(
                               fontSize: 26,
                               fontWeight: FontWeight.bold,
@@ -468,7 +311,7 @@ class _RadarTabState extends State<_RadarTab>
           ),
         ),
 
-        // Lista utenti rilevati
+        // Lista orizzontale utenti rilevati
         if (_nearbyUsers.isNotEmpty)
           Container(
             height: 120,
@@ -491,10 +334,10 @@ class _RadarTabState extends State<_RadarTab>
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        _UserDot(user: nearby.user, rssi: nearby.rssi),
+                        _UserDot(nearby: nearby),
                         const SizedBox(height: 6),
                         Text(
-                          nearby.user?.firstName ?? nearby.bleId.substring(0, 6),
+                          nearby.firstName,
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
@@ -502,7 +345,7 @@ class _RadarTabState extends State<_RadarTab>
                           overflow: TextOverflow.ellipsis,
                         ),
                         Text(
-                          _rssiToDistance(nearby.rssi),
+                          nearby.distanceLabel,
                           style: TextStyle(
                             fontSize: 10,
                             color: theme.colorScheme.onSurfaceVariant,
@@ -518,11 +361,28 @@ class _RadarTabState extends State<_RadarTab>
         else
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Text(
-              'Nessuno nelle vicinanze',
-              style: TextStyle(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+            child: Column(
+              children: [
+                Icon(Icons.sensors,
+                    size: 32,
+                    color: theme.colorScheme.onSurfaceVariant),
+                const SizedBox(height: 8),
+                Text(
+                  'Scansione in corso...',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Le persone vicine appariranno qui',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ),
           ),
 
@@ -531,9 +391,7 @@ class _RadarTabState extends State<_RadarTab>
     );
   }
 
-  void _showUserCard(BuildContext context, _NearbyUser nearby) {
-    if (nearby.user == null) return;
-    final user = nearby.user!;
+  void _showUserCard(BuildContext context, NearbyUser nearby) {
     final theme = Theme.of(context);
 
     showModalBottomSheet(
@@ -546,7 +404,6 @@ class _RadarTabState extends State<_RadarTab>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Handle
             Container(
               width: 40,
               height: 4,
@@ -565,30 +422,25 @@ class _RadarTabState extends State<_RadarTab>
                 color: theme.colorScheme.primaryContainer,
                 shape: BoxShape.circle,
               ),
-              child: Center(
-                child: Text(
-                  user.firstName[0].toUpperCase(),
-                  style: TextStyle(
-                    fontSize: 30,
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.primary,
-                  ),
-                ),
-              ),
+              child: nearby.avatarURL.isNotEmpty
+                  ? ClipOval(
+                      child: Image.network(nearby.avatarURL,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                              _initial(nearby, theme)))
+                  : _initial(nearby, theme),
             ),
             const SizedBox(height: 12),
 
             Text(
-              user.fullName,
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
+              nearby.displayName,
+              style: theme.textTheme.titleLarge
+                  ?.copyWith(fontWeight: FontWeight.bold),
             ),
             Text(
-              '${user.role} · ${user.company}',
-              style: TextStyle(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              '${nearby.role} · ${nearby.company}',
+              style:
+                  TextStyle(color: theme.colorScheme.onSurfaceVariant),
             ),
             const SizedBox(height: 8),
             Container(
@@ -599,7 +451,7 @@ class _RadarTabState extends State<_RadarTab>
                 borderRadius: BorderRadius.circular(20),
               ),
               child: Text(
-                _rssiToDistance(nearby.rssi),
+                nearby.distanceLabel,
                 style: TextStyle(
                   color: theme.colorScheme.primary,
                   fontWeight: FontWeight.w600,
@@ -607,37 +459,15 @@ class _RadarTabState extends State<_RadarTab>
                 ),
               ),
             ),
-
             const SizedBox(height: 24),
 
-            
-            // Bottone scambio biglietto
+            // Scambia biglietto
             SizedBox(
               width: double.infinity,
               height: 52,
-              child: FilledButton.icon(
-                icon: const Icon(Icons.contactless),
-                label: const Text('Scambia biglietto'),
-                onPressed: () async {
-                  Navigator.pop(ctx);
-                  await FirestoreService.shared
-                      .sendConnectionRequest(user.uid);
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          'Richiesta inviata a ${user.firstName}!',
-                        ),
-                        backgroundColor: theme.colorScheme.primary,
-                      ),
-                    );
-                  }
-                },
-                style: FilledButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
+              child: _SendRequestButton(
+                targetUid: nearby.uid,
+                targetName: nearby.firstName,
               ),
             ),
             const SizedBox(height: 12),
@@ -646,13 +476,89 @@ class _RadarTabState extends State<_RadarTab>
       ),
     );
   }
+
+  Widget _initial(NearbyUser nearby, ThemeData theme) {
+    return Center(
+      child: Text(
+        nearby.firstName[0].toUpperCase(),
+        style: TextStyle(
+          fontSize: 30,
+          fontWeight: FontWeight.bold,
+          color: theme.colorScheme.primary,
+        ),
+      ),
+    );
+  }
 }
 
-// Punto utente sul radar
+/// Bottone "Scambia biglietto" con stato e gestione errori.
+class _SendRequestButton extends StatefulWidget {
+  final String targetUid;
+  final String targetName;
+  const _SendRequestButton(
+      {required this.targetUid, required this.targetName});
+
+  @override
+  State<_SendRequestButton> createState() => _SendRequestButtonState();
+}
+
+class _SendRequestButtonState extends State<_SendRequestButton> {
+  bool _loading = false;
+
+  Future<void> _send() async {
+    setState(() => _loading = true);
+    try {
+      await FirestoreService.shared
+          .sendConnectionRequest(widget.targetUid);
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content:
+                Text('Richiesta inviata a ${widget.targetName}!'),
+            backgroundColor: Theme.of(context).colorScheme.primary,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', '')),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.icon(
+      icon: _loading
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                  strokeWidth: 2, color: Colors.white))
+          : const Icon(Icons.contactless),
+      label: Text(_loading ? 'Invio...' : 'Scambia biglietto'),
+      onPressed: _loading ? null : _send,
+      style: FilledButton.styleFrom(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Radar Dot ──────────────────────────────────────────────
 class _UserDot extends StatelessWidget {
-  final UserModel? user;
-  final int rssi;
-  const _UserDot({this.user, required this.rssi});
+  final NearbyUser nearby;
+  const _UserDot({required this.nearby});
 
   @override
   Widget build(BuildContext context) {
@@ -668,21 +574,32 @@ class _UserDot extends StatelessWidget {
           width: 2,
         ),
       ),
-      child: Center(
-        child: Text(
-          user?.firstName[0].toUpperCase() ?? '?',
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-            color: theme.colorScheme.secondary,
-          ),
+      child: nearby.avatarURL.isNotEmpty
+          ? ClipOval(
+              child: Image.network(
+              nearby.avatarURL,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => _letter(theme),
+            ))
+          : _letter(theme),
+    );
+  }
+
+  Widget _letter(ThemeData theme) {
+    return Center(
+      child: Text(
+        nearby.firstName[0].toUpperCase(),
+        style: TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+          color: theme.colorScheme.secondary,
         ),
       ),
     );
   }
 }
 
-// Painter per il sweep animato del radar
+// ── Radar sweep painter ────────────────────────────────────
 class _RadarSweepPainter extends CustomPainter {
   final double angle;
   final Color color;
@@ -697,10 +614,7 @@ class _RadarSweepPainter extends CustomPainter {
       ..shader = SweepGradient(
         startAngle: angle - 1.2,
         endAngle: angle,
-        colors: [
-          color.withOpacity(0),
-          color.withOpacity(0.3),
-        ],
+        colors: [color.withOpacity(0), color.withOpacity(0.3)],
         transform: GradientRotation(angle - 1.2),
       ).createShader(Rect.fromCircle(center: center, radius: radius))
       ..style = PaintingStyle.fill;
@@ -713,7 +627,6 @@ class _RadarSweepPainter extends CustomPainter {
       paint,
     );
 
-    // Linea del sweep
     final linePaint = Paint()
       ..color = color.withOpacity(0.6)
       ..strokeWidth = 1.5
@@ -721,31 +634,14 @@ class _RadarSweepPainter extends CustomPainter {
 
     canvas.drawLine(
       center,
-      Offset(
-        center.dx + radius * cos(angle),
-        center.dy + radius * sin(angle),
-      ),
+      Offset(center.dx + radius * cos(angle),
+          center.dy + radius * sin(angle)),
       linePaint,
     );
   }
 
   @override
   bool shouldRepaint(_RadarSweepPainter old) => old.angle != angle;
-}
-
-// Modello utente vicino
-class _NearbyUser {
-  final String bleId;
-  final int rssi;
-  final DateTime lastSeen;
-  final UserModel? user;
-
-  _NearbyUser({
-    required this.bleId,
-    required this.rssi,
-    required this.lastSeen,
-    this.user,
-  });
 }
 
 // ── TAB WALLET ─────────────────────────────────────────────
@@ -770,16 +666,11 @@ class _WalletTab extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(
-                  Icons.contacts_outlined,
-                  size: 64,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+                Icon(Icons.contacts_outlined,
+                    size: 64, color: theme.colorScheme.onSurfaceVariant),
                 const SizedBox(height: 16),
-                Text(
-                  'Nessun contatto ancora',
-                  style: theme.textTheme.titleMedium,
-                ),
+                Text('Nessun contatto ancora',
+                    style: theme.textTheme.titleMedium),
                 const SizedBox(height: 8),
                 Text(
                   'I biglietti scambiati appariranno qui',
@@ -796,10 +687,7 @@ class _WalletTab extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           itemCount: contacts.length,
           separatorBuilder: (_, __) => const SizedBox(height: 12),
-          itemBuilder: (context, i) {
-            final contact = contacts[i];
-            return _ContactCard(contact: contact);
-          },
+          itemBuilder: (context, i) => _ContactCard(contact: contacts[i]),
         );
       },
     );
@@ -825,7 +713,6 @@ class _ContactCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            // Avatar
             Container(
               width: 52,
               height: 52,
@@ -845,19 +732,13 @@ class _ContactCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 14),
-
-            // Info
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    contact.fullName,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 15,
-                    ),
-                  ),
+                  Text(contact.fullName,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 15)),
                   const SizedBox(height: 2),
                   Text(
                     '${contact.role} · ${contact.company}',
@@ -866,32 +747,25 @@ class _ContactCard extends StatelessWidget {
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  if (contact.connectedAt != null) ...[
+                  if (contact.eventName.isNotEmpty) ...[
                     const SizedBox(height: 4),
                     Text(
-                      'Connesso il ${_formatDate(contact.connectedAt!)}',
+                      contact.eventName,
                       style: TextStyle(
                         fontSize: 11,
-                        color: theme.colorScheme.onSurfaceVariant,
+                        color: theme.colorScheme.primary,
                       ),
                     ),
                   ],
                 ],
               ),
             ),
-
-            Icon(
-              Icons.chevron_right,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            Icon(Icons.chevron_right,
+                color: theme.colorScheme.onSurfaceVariant),
           ],
         ),
       ),
     );
-  }
-
-  String _formatDate(DateTime date) {
-    return '${date.day}/${date.month}/${date.year}';
   }
 
   void _showContactDetail(BuildContext context, WalletContact contact) {
@@ -913,7 +787,6 @@ class _ContactCard extends StatelessWidget {
           padding: const EdgeInsets.all(24),
           child: Column(
             children: [
-              // Handle
               Container(
                 width: 40,
                 height: 4,
@@ -923,8 +796,6 @@ class _ContactCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 24),
-
-              // Avatar grande
               Container(
                 width: 88,
                 height: 88,
@@ -944,65 +815,29 @@ class _ContactCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 12),
-
-              Text(
-                contact.fullName,
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              Text(
-                '${contact.role} · ${contact.company}',
-                style: TextStyle(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
+              Text(contact.fullName,
+                  style: theme.textTheme.headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.bold)),
+              Text('${contact.role} · ${contact.company}',
+                  style: TextStyle(
+                      color: theme.colorScheme.onSurfaceVariant)),
               const SizedBox(height: 24),
-
-              // Dettagli contatto
               if (contact.email.isNotEmpty)
                 _DetailRow(
-                  icon: Icons.email_outlined,
-                  label: 'Email',
-                  value: contact.email,
-                ),
+                    icon: Icons.email_outlined,
+                    label: 'Email',
+                    value: contact.email),
               if (contact.phone.isNotEmpty)
                 _DetailRow(
-                  icon: Icons.phone_outlined,
-                  label: 'Telefono',
-                  value: contact.phone,
-                ),
+                    icon: Icons.phone_outlined,
+                    label: 'Telefono',
+                    value: contact.phone),
               if (contact.linkedin.isNotEmpty)
                 _DetailRow(
-                  icon: Icons.link_outlined,
-                  label: 'LinkedIn',
-                  value: contact.linkedin,
-                ),
-
+                    icon: Icons.link_outlined,
+                    label: 'LinkedIn',
+                    value: contact.linkedin),
               const SizedBox(height: 24),
-
-              // Bottone salva in rubrica
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: FilledButton.icon(
-                  icon: const Icon(Icons.person_add_outlined),
-                  label: const Text('Salva in rubrica'),
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Funzione rubrica — prossimamente!'),
-                      ),
-                    );
-                  },
-                  style: FilledButton.styleFrom(
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
-              ),
             ],
           ),
         ),
@@ -1015,11 +850,8 @@ class _DetailRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final String value;
-  const _DetailRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
+  const _DetailRow(
+      {required this.icon, required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) {
@@ -1038,17 +870,12 @@ class _DetailRow extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              Text(
-                value,
-                style: const TextStyle(fontWeight: FontWeight.w500),
-              ),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: theme.colorScheme.onSurfaceVariant)),
+              Text(value,
+                  style: const TextStyle(fontWeight: FontWeight.w500)),
             ],
           ),
         ],
@@ -1059,14 +886,14 @@ class _DetailRow extends StatelessWidget {
 
 // ── TAB PROFILO ────────────────────────────────────────────
 class _ProfileTab extends StatelessWidget {
-  const _ProfileTab({super.key}) : super();
+  final UserModel currentUser;
+  const _ProfileTab({required this.currentUser});
 
   @override
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return const Center(child: CircularProgressIndicator());
 
-    // StreamBuilder diretto su Firestore — aggiornamento in tempo reale
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('users')
@@ -1077,7 +904,9 @@ class _ProfileTab extends StatelessWidget {
           return const Center(child: CircularProgressIndicator());
         }
         final data = snapshot.data!.data() as Map<String, dynamic>?;
-        if (data == null) return const Center(child: Text('Profilo non trovato'));
+        if (data == null) {
+          return const Center(child: Text('Profilo non trovato'));
+        }
         final user = UserModel.fromMap(data);
         return _ProfileContent(user: user);
       },
@@ -1128,7 +957,7 @@ class _ProfileContentState extends State<_ProfileContent> {
         children: [
           const SizedBox(height: 20),
 
-          // Avatar con bottone modifica
+          // Avatar
           Stack(
             children: [
               GestureDetector(
@@ -1146,13 +975,13 @@ class _ProfileContentState extends State<_ProfileContent> {
                   ),
                   child: ClipOval(
                     child: _uploadingPhoto
-                        ? const Center(child: CircularProgressIndicator())
+                        ? const Center(
+                            child: CircularProgressIndicator())
                         : user.avatarURL.isNotEmpty
-                            ? Image.network(
-                                user.avatarURL,
+                            ? Image.network(user.avatarURL,
                                 fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => _initial(user, theme),
-                              )
+                                errorBuilder: (_, __, ___) =>
+                                    _initial(user, theme))
                             : _initial(user, theme),
                   ),
                 ),
@@ -1177,23 +1006,17 @@ class _ProfileContentState extends State<_ProfileContent> {
           ),
 
           const SizedBox(height: 16),
-
-          Text(
-            user.fullName,
-            style: theme.textTheme.headlineSmall
-                ?.copyWith(fontWeight: FontWeight.bold),
-          ),
+          Text(user.fullName,
+              style: theme.textTheme.headlineSmall
+                  ?.copyWith(fontWeight: FontWeight.bold)),
           const SizedBox(height: 4),
-          Text(
-            '${user.role} · ${user.company}',
-            style: theme.textTheme.bodyLarge?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
+          Text('${user.role} · ${user.company}',
+              style: theme.textTheme.bodyLarge?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant)),
 
           const SizedBox(height: 12),
 
-          // Bottoni azione
+          // QR + Modifica
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -1202,9 +1025,8 @@ class _ProfileContentState extends State<_ProfileContent> {
                 label: const Text('Mostra QR'),
                 onPressed: () => _showQrCode(context, user),
                 style: OutlinedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20)),
-                ),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20))),
               ),
               const SizedBox(width: 12),
               OutlinedButton.icon(
@@ -1219,9 +1041,8 @@ class _ProfileContentState extends State<_ProfileContent> {
                   );
                 },
                 style: OutlinedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20)),
-                ),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20))),
               ),
             ],
           ),
@@ -1263,15 +1084,17 @@ class _ProfileContentState extends State<_ProfileContent> {
               decoration: BoxDecoration(
                 color: theme.colorScheme.surface,
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: theme.colorScheme.outlineVariant),
+                border: Border.all(
+                    color: theme.colorScheme.outlineVariant),
               ),
               child: Text(user.bio!,
                   style: const TextStyle(fontSize: 14, height: 1.5)),
             ),
           ],
 
+          // Session info
           const SizedBox(height: 8),
-          _SectionHeader(title: 'Informazioni app'),
+          _SectionHeader(title: 'Sessione evento'),
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -1283,13 +1106,13 @@ class _ProfileContentState extends State<_ProfileContent> {
                 Icon(Icons.bluetooth,
                     color: theme.colorScheme.primary, size: 18),
                 const SizedBox(width: 8),
-                Text('BLE ID: ',
+                Text('BLE Session: ',
                     style: TextStyle(
                         color: theme.colorScheme.onSurfaceVariant,
                         fontSize: 12)),
                 Expanded(
                   child: Text(
-                    user.bleId,
+                    EventSessionService.shared.sessionBleId ?? 'N/A',
                     style: const TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 12,
@@ -1303,14 +1126,15 @@ class _ProfileContentState extends State<_ProfileContent> {
 
           const SizedBox(height: 32),
 
+          // Esci dall'evento
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
-              icon: const Icon(Icons.logout),
-              label: const Text('Esci'),
+              icon: const Icon(Icons.exit_to_app),
+              label: const Text('Esci dall\'evento'),
               onPressed: () async {
-                await BleService.shared.stopAll();
-                await AuthService().logout();
+                await EventSessionService.shared.leaveEvent();
+                if (context.mounted) Navigator.pop(context);
               },
               style: OutlinedButton.styleFrom(
                 foregroundColor: theme.colorScheme.error,
@@ -1339,9 +1163,10 @@ class _ProfileContentState extends State<_ProfileContent> {
     );
   }
 
-  // QR risolto — isScrollControlled + SingleChildScrollView
   void _showQrCode(BuildContext context, UserModel user) {
     final theme = Theme.of(context);
+    final eventId = EventSessionService.shared.currentEventId ?? '';
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1367,16 +1192,14 @@ class _ProfileContentState extends State<_ProfileContent> {
               ),
             ),
             const SizedBox(height: 24),
-            Text(
-              'Il tuo QR ProxiMeet',
-              style: theme.textTheme.titleLarge
-                  ?.copyWith(fontWeight: FontWeight.bold),
-            ),
+            Text('Il tuo QR ProxiMeet',
+                style: theme.textTheme.titleLarge
+                    ?.copyWith(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             Text(
               'Mostralo a qualcuno per scambiare il biglietto',
-              style:
-                  TextStyle(color: theme.colorScheme.onSurfaceVariant),
+              style: TextStyle(
+                  color: theme.colorScheme.onSurfaceVariant),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
@@ -1387,7 +1210,8 @@ class _ProfileContentState extends State<_ProfileContent> {
               ),
               padding: const EdgeInsets.all(16),
               child: QrImageView(
-                data: 'proximeet://user/${user.uid}',
+                // QR contiene uid + eventId per il fallback
+                data: 'proximeet://user/${user.uid}?event=$eventId',
                 version: QrVersions.auto,
                 size: 200,
               ),
@@ -1395,11 +1219,9 @@ class _ProfileContentState extends State<_ProfileContent> {
             const SizedBox(height: 16),
             Text(user.fullName,
                 style: const TextStyle(fontWeight: FontWeight.bold)),
-            Text(
-              '${user.role} · ${user.company}',
-              style:
-                  TextStyle(color: theme.colorScheme.onSurfaceVariant),
-            ),
+            Text('${user.role} · ${user.company}',
+                style: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant)),
             const SizedBox(height: 32),
           ],
         ),
@@ -1446,7 +1268,6 @@ class _InfoCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
@@ -1462,17 +1283,12 @@ class _InfoCard extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              Text(
-                value,
-                style: const TextStyle(fontWeight: FontWeight.w500),
-              ),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: theme.colorScheme.onSurfaceVariant)),
+              Text(value,
+                  style: const TextStyle(fontWeight: FontWeight.w500)),
             ],
           ),
         ],
