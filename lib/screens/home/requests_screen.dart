@@ -28,16 +28,11 @@ class RequestsScreen extends StatelessWidget {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(
-                    Icons.inbox_outlined,
-                    size: 64,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+                  Icon(Icons.inbox_outlined,
+                      size: 64, color: theme.colorScheme.onSurfaceVariant),
                   const SizedBox(height: 16),
-                  Text(
-                    'Nessuna richiesta',
-                    style: theme.textTheme.titleMedium,
-                  ),
+                  Text('Nessuna richiesta',
+                      style: theme.textTheme.titleMedium),
                   const SizedBox(height: 8),
                   Text(
                     'Le richieste di biglietto appariranno qui',
@@ -54,9 +49,7 @@ class RequestsScreen extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             itemCount: requests.length,
             separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemBuilder: (context, i) {
-              return _RequestCard(request: requests[i]);
-            },
+            itemBuilder: (context, i) => _RequestCard(request: requests[i]),
           );
         },
       ),
@@ -83,8 +76,8 @@ class _RequestCardState extends State<_RequestCard> {
   }
 
   Future<void> _loadSender() async {
-    final user = await FirestoreService.shared
-        .getUserByUid(widget.request.senderUid);
+    final user =
+        await FirestoreService.shared.getUserByUid(widget.request.senderUid);
     if (mounted) {
       setState(() {
         _senderName = user?.fullName ?? 'Utente sconosciuto';
@@ -139,7 +132,6 @@ class _RequestCardState extends State<_RequestCard> {
         children: [
           Row(
             children: [
-              // Avatar
               Container(
                 width: 52,
                 height: 52,
@@ -161,7 +153,6 @@ class _RequestCardState extends State<_RequestCard> {
                 ),
               ),
               const SizedBox(width: 14),
-
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -169,9 +160,7 @@ class _RequestCardState extends State<_RequestCard> {
                     Text(
                       _senderName ?? 'Caricamento...',
                       style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                      ),
+                          fontWeight: FontWeight.bold, fontSize: 15),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -186,15 +175,11 @@ class _RequestCardState extends State<_RequestCard> {
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
-          // Bottoni risposta
           _loading
               ? const Center(child: CircularProgressIndicator())
               : Row(
                   children: [
-                    // Rifiuta
                     Expanded(
                       child: OutlinedButton.icon(
                         icon: const Icon(Icons.close),
@@ -202,17 +187,13 @@ class _RequestCardState extends State<_RequestCard> {
                         onPressed: () => _respond(false),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: theme.colorScheme.error,
-                          side: BorderSide(
-                            color: theme.colorScheme.error,
-                          ),
+                          side: BorderSide(color: theme.colorScheme.error),
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
+                              borderRadius: BorderRadius.circular(10)),
                         ),
                       ),
                     ),
                     const SizedBox(width: 12),
-                    // Accetta
                     Expanded(
                       child: FilledButton.icon(
                         icon: const Icon(Icons.check),
@@ -220,8 +201,7 @@ class _RequestCardState extends State<_RequestCard> {
                         onPressed: () => _respond(true),
                         style: FilledButton.styleFrom(
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
+                              borderRadius: BorderRadius.circular(10)),
                         ),
                       ),
                     ),

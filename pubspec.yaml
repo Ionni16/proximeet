@@ -25,6 +25,7 @@ dependencies:
 
   # BLE
   flutter_blue_plus: ^1.35.3
+  flutter_ble_peripheral: ^2.1.0
 
   # QR
   mobile_scanner: ^7.0.0

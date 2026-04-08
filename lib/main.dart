@@ -3,7 +3,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 import 'screens/auth/login_screen.dart';
-import 'screens/home/home_screen.dart';
+import 'screens/events/event_list_screen.dart';
+import 'services/event_session_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,8 +14,34 @@ void main() async {
   runApp(const ProxiMeetApp());
 }
 
-class ProxiMeetApp extends StatelessWidget {
+class ProxiMeetApp extends StatefulWidget {
   const ProxiMeetApp({super.key});
+
+  @override
+  State<ProxiMeetApp> createState() => _ProxiMeetAppState();
+}
+
+class _ProxiMeetAppState extends State<ProxiMeetApp>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// Best-effort cleanup quando l'app viene chiusa.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      EventSessionService.shared.leaveEvent();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -44,9 +71,13 @@ class ProxiMeetApp extends StatelessWidget {
               body: Center(child: CircularProgressIndicator()),
             );
           }
+
+          // Autenticato → lista eventi
           if (snapshot.hasData) {
-            return const HomeScreen();
+            return const EventListScreen();
           }
+
+          // Non autenticato → login
           return const LoginScreen();
         },
       ),

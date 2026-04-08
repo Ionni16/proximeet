@@ -11,8 +11,6 @@ class UserModel {
   final String? twitter;
   final String? phone;
   final String? bio;
-  final String bleId;
-  final bool trackingEnabled;
   final DateTime createdAt;
 
   UserModel({
@@ -28,8 +26,6 @@ class UserModel {
     this.twitter,
     this.phone,
     this.bio,
-    required this.bleId,
-    this.trackingEnabled = true,
     required this.createdAt,
   });
 
@@ -49,8 +45,6 @@ class UserModel {
       'twitter': twitter,
       'phone': phone,
       'bio': bio,
-      'bleId': bleId,
-      'trackingEnabled': trackingEnabled,
       'createdAt': createdAt.toIso8601String(),
     };
   }
@@ -69,11 +63,20 @@ class UserModel {
       twitter: map['twitter'],
       phone: map['phone'],
       bio: map['bio'],
-      bleId: map['bleId'] ?? '',
-      trackingEnabled: map['trackingEnabled'] ?? true,
       createdAt: DateTime.parse(
         map['createdAt'] ?? DateTime.now().toIso8601String(),
       ),
     );
+  }
+
+  /// Summary compatto per bleMapping / presence
+  Map<String, dynamic> toSummary() {
+    return {
+      'uid': uid,
+      'displayName': fullName,
+      'company': company,
+      'role': role,
+      'avatarURL': avatarURL,
+    };
   }
 }
