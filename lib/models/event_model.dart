@@ -9,11 +9,6 @@ class EventModel {
   final DateTime endDate;
   final bool isActive;
 
-  /// UUID fisso del service BLE per quest'app (uguale per tutti gli eventi).
-  /// Serve a flutter_blue_plus per filtrare lo scan solo su dispositivi ProxiMeet.
-  static const String appBleServiceUuid =
-      '12345678-1234-1234-1234-123456789abc';
-
   EventModel({
     required this.id,
     required this.name,
@@ -45,5 +40,18 @@ class EventModel {
       'endDate': Timestamp.fromDate(endDate),
       'isActive': isActive,
     };
+  }
+
+  /// Formato data leggibile.
+  String get dateRange {
+    final start = '${startDate.day}/${startDate.month}';
+    final end = '${endDate.day}/${endDate.month}';
+    return '$start – $end';
+  }
+
+  /// True se l'evento è in corso adesso.
+  bool get isOngoing {
+    final now = DateTime.now();
+    return now.isAfter(startDate) && now.isBefore(endDate);
   }
 }

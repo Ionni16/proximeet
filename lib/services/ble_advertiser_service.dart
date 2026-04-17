@@ -1,25 +1,21 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
-import '../models/event_model.dart';
+
+import '../core/constants.dart';
+import '../core/logger.dart';
 
 /// BLE Advertising cross-platform (Android + iOS).
 ///
-/// PROBLEMA iOS:
-/// Apple ignora/riscrive il manufacturer data nei pacchetti BLE.
-/// Il campo manufacturerData NON arriva agli scanner esterni.
-///
-/// SOLUZIONE:
-/// Usiamo il **local name** con prefix "PM-" come carrier del sessionBleId.
-/// Funziona sia su Android che su iOS (in foreground).
+/// SOLUZIONE iOS:
+/// Apple ignora manufacturer data nei pacchetti BLE.
+/// Usiamo il local name con prefix "PM-" come carrier del sessionBleId.
 /// Su Android aggiungiamo anche manufacturer data come ridondanza.
 ///
-/// Lo scanner cercherà il sessionBleId in questo ordine:
-/// 1. Manufacturer data 0xFF01 (Android→Android, più affidabile)
-/// 2. Local name con prefix "PM-" (cross-platform, funziona sempre in foreground)
+/// Singleton: usa [BleAdvertiserService.instance].
 class BleAdvertiserService {
-  static final BleAdvertiserService shared = BleAdvertiserService._();
   BleAdvertiserService._();
+  static final BleAdvertiserService instance = BleAdvertiserService._();
 
   final _peripheral = FlutterBlePeripheral();
   bool _isAdvertising = false;
@@ -34,7 +30,7 @@ class BleAdvertiserService {
     try {
       final isSupported = await _peripheral.isSupported;
       if (!isSupported) {
-        print('[BLE-ADV] Peripheral advertising non supportato');
+        Log.w('BLE-ADV', 'Peripheral advertising non supportato');
         return false;
       }
 
@@ -44,21 +40,20 @@ class BleAdvertiserService {
         return await _startAndroid(sessionBleId);
       }
     } catch (e) {
-      print('[BLE-ADV] Errore start: $e');
+      Log.e('BLE-ADV', 'Errore start', e);
       _isAdvertising = false;
       return false;
     }
   }
 
-  /// Android: manufacturer data + service UUID + local name.
   Future<bool> _startAndroid(String sessionBleId) async {
     final sessionBytes = _hexToBytes(sessionBleId);
 
     final advertiseData = AdvertiseData(
-      serviceUuid: EventModel.appBleServiceUuid,
-      manufacturerId: 0xFF01,
+      serviceUuid: AppConstants.bleServiceUuid,
+      manufacturerId: AppConstants.bleManufacturerId,
       manufacturerData: sessionBytes,
-      localName: 'PM-$sessionBleId',
+      localName: '${AppConstants.bleNamePrefix}$sessionBleId',
       includeDeviceName: false,
     );
 
@@ -76,19 +71,14 @@ class BleAdvertiserService {
 
     _isAdvertising = true;
     _currentSessionBleId = sessionBleId;
-    print('[BLE-ADV] Android avviato: $sessionBleId (mfgData + localName)');
+    Log.d('BLE-ADV', 'Android avviato: $sessionBleId');
     return true;
   }
 
-  /// iOS: solo service UUID + local name.
-  /// CBPeripheralManager su iOS supporta solo:
-  /// - CBAdvertisementDataServiceUUIDsKey (→ serviceUuid)
-  /// - CBAdvertisementDataLocalNameKey (→ localName)
-  /// Il manufacturer data viene silenziosamente ignorato.
   Future<bool> _startIOS(String sessionBleId) async {
     final advertiseData = AdvertiseData(
-      serviceUuid: EventModel.appBleServiceUuid,
-      localName: 'PM-$sessionBleId',
+      serviceUuid: AppConstants.bleServiceUuid,
+      localName: '${AppConstants.bleNamePrefix}$sessionBleId',
       includeDeviceName: false,
     );
 
@@ -96,7 +86,7 @@ class BleAdvertiserService {
 
     _isAdvertising = true;
     _currentSessionBleId = sessionBleId;
-    print('[BLE-ADV] iOS avviato: $sessionBleId (via localName)');
+    Log.d('BLE-ADV', 'iOS avviato: $sessionBleId');
     return true;
   }
 
@@ -105,11 +95,11 @@ class BleAdvertiserService {
     try {
       await _peripheral.stop();
     } catch (e) {
-      print('[BLE-ADV] Errore stop: $e');
+      Log.e('BLE-ADV', 'Errore stop', e);
     }
     _isAdvertising = false;
     _currentSessionBleId = null;
-    print('[BLE-ADV] Fermato');
+    Log.d('BLE-ADV', 'Fermato');
   }
 
   Uint8List _hexToBytes(String hex) {

@@ -9,7 +9,7 @@ admin.initializeApp();
 async function getUserFcmToken(userId) {
   const db = admin.firestore();
   const doc = await db.collection("users").doc(userId).get();
-  if (!doc.exists) throw new Error(`Utente ${userId} non trovato`);
+  if (!doc.exists) return null;
   return doc.data().fcmToken || null;
 }
 
@@ -22,7 +22,10 @@ async function getUserName(userId) {
 }
 
 // ── FUNZIONE 1: sendCardRequest ───────────────────────────
-// Chiamata quando A vuole scambiare il biglietto con B
+// Invia notifica push quando A vuole scambiare il biglietto con B.
+//
+// NOTA: La richiesta viene scritta su Firestore dal client (FirestoreService).
+// Questa funzione gestisce SOLO la notifica push.
 exports.sendCardRequest = onCall(async (request) => {
   const { receiverUid } = request.data;
   const senderUid = request.auth?.uid;
@@ -34,20 +37,6 @@ exports.sendCardRequest = onCall(async (request) => {
     throw new HttpsError("invalid-argument", "receiverUid mancante.");
   }
 
-  const db = admin.firestore();
-
-  // Salva richiesta su Firestore
-  await db
-    .collection("connectionRequests")
-    .doc(`${senderUid}_${receiverUid}`)
-    .set({
-      senderUid,
-      receiverUid,
-      status: "pending",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-  // Invia notifica push a B
   try {
     const senderName = await getUserName(senderUid);
     const receiverToken = await getUserFcmToken(receiverUid);
@@ -63,22 +52,28 @@ exports.sendCardRequest = onCall(async (request) => {
           type: "card_request",
           senderUid,
           senderName,
-          requestId: `${senderUid}_${receiverUid}`,
         },
-        android: {
-          priority: "high",
+        android: { priority: "high" },
+        apns: {
+          payload: {
+            aps: { sound: "default", badge: 1 },
+          },
         },
       });
     }
   } catch (e) {
-    console.error("Errore notifica:", e);
+    console.error("Errore notifica sendCardRequest:", e);
   }
 
   return { success: true };
 });
 
 // ── FUNZIONE 2: respondCardRequest ────────────────────────
-// Chiamata quando B accetta o rifiuta la richiesta di A
+// Invia notifica push quando B accetta/rifiuta la richiesta di A.
+//
+// NOTA: Il wallet viene scritto dal client (FirestoreService.respondToRequest).
+// Questa funzione gestisce SOLO la notifica push.
+// Questo evita il problema di doppia scrittura wallet (client + CF).
 exports.respondCardRequest = onCall(async (request) => {
   const { senderUid, accepted } = request.data;
   const receiverUid = request.auth?.uid;
@@ -90,71 +85,6 @@ exports.respondCardRequest = onCall(async (request) => {
     throw new HttpsError("invalid-argument", "senderUid mancante.");
   }
 
-  const db = admin.firestore();
-  const requestId = `${senderUid}_${receiverUid}`;
-  const status = accepted ? "accepted" : "rejected";
-
-  // Aggiorna stato richiesta
-  await db
-    .collection("connectionRequests")
-    .doc(requestId)
-    .update({
-      status,
-      respondedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-  // Se accettata salva nel wallet di entrambi
-  if (accepted) {
-    const [senderDoc, receiverDoc] = await Promise.all([
-      db.collection("users").doc(senderUid).get(),
-      db.collection("users").doc(receiverUid).get(),
-    ]);
-
-    const senderData = senderDoc.data();
-    const receiverData = receiverDoc.data();
-
-    // Salva nel wallet del sender
-    await db
-      .collection("connections")
-      .doc(senderUid)
-      .collection("contacts")
-      .doc(receiverUid)
-      .set({
-        uid: receiverUid,
-        firstName: receiverData.firstName,
-        lastName: receiverData.lastName,
-        company: receiverData.company,
-        role: receiverData.role,
-        email: receiverData.email,
-        phone: receiverData.phone || "",
-        linkedin: receiverData.linkedin || "",
-        avatarURL: receiverData.avatarURL || "",
-        connectedAt: admin.firestore.FieldValue.serverTimestamp(),
-        note: "",
-      });
-
-    // Salva nel wallet del receiver
-    await db
-      .collection("connections")
-      .doc(receiverUid)
-      .collection("contacts")
-      .doc(senderUid)
-      .set({
-        uid: senderUid,
-        firstName: senderData.firstName,
-        lastName: senderData.lastName,
-        company: senderData.company,
-        role: senderData.role,
-        email: senderData.email,
-        phone: senderData.phone || "",
-        linkedin: senderData.linkedin || "",
-        avatarURL: senderData.avatarURL || "",
-        connectedAt: admin.firestore.FieldValue.serverTimestamp(),
-        note: "",
-      });
-  }
-
-  // Notifica push al sender con la risposta
   try {
     const receiverName = await getUserName(receiverUid);
     const senderToken = await getUserFcmToken(senderUid);
@@ -163,9 +93,7 @@ exports.respondCardRequest = onCall(async (request) => {
       await admin.messaging().send({
         token: senderToken,
         notification: {
-          title: accepted
-            ? "Richiesta accettata!"
-            : "Richiesta rifiutata",
+          title: accepted ? "Richiesta accettata!" : "Richiesta rifiutata",
           body: accepted
             ? `${receiverName} ha accettato il tuo biglietto`
             : `${receiverName} ha rifiutato la tua richiesta`,
@@ -175,37 +103,116 @@ exports.respondCardRequest = onCall(async (request) => {
           receiverUid,
           accepted: accepted.toString(),
         },
-        android: {
-          priority: "high",
+        android: { priority: "high" },
+        apns: {
+          payload: {
+            aps: { sound: "default" },
+          },
         },
       });
     }
   } catch (e) {
-    console.error("Errore notifica risposta:", e);
+    console.error("Errore notifica respondCardRequest:", e);
   }
 
   return { success: true };
 });
 
 // ── FUNZIONE 3: cleanupOldDetections ─────────────────────
-// Cancella rilevazioni BLE più vecchie di 10 minuti
-// Gira automaticamente ogni ora
+// Cancella rilevazioni BLE più vecchie di 10 minuti.
+// Gira automaticamente ogni ora.
+//
+// FIX: il vecchio codice cercava nella collection "bleDetections"
+// che non esiste. Il path corretto è:
+//   events/{eventId}/detections/{uid}/nearby/{targetUid}
 exports.cleanupOldDetections = onSchedule("every 60 minutes", async () => {
   const db = admin.firestore();
-  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  const tenMinutesAgo = admin.firestore.Timestamp.fromDate(
+    new Date(Date.now() - 10 * 60 * 1000)
+  );
 
-  const collections = await db.collection("bleDetections").listDocuments();
-
-  for (const docRef of collections) {
-    const oldDetections = await docRef
-      .collection("detections")
-      .where("timestamp", "<", tenMinutesAgo)
+  try {
+    // Recupera tutti gli eventi attivi
+    const events = await db
+      .collection("events")
+      .where("isActive", "==", true)
       .get();
 
-    const batch = db.batch();
-    oldDetections.docs.forEach((d) => batch.delete(d.ref));
-    await batch.commit();
-  }
+    let totalDeleted = 0;
 
-  console.log("Cleanup completato");
+    for (const eventDoc of events.docs) {
+      const eventId = eventDoc.id;
+
+      // Per ogni evento, trova tutti i documenti "detections/{uid}"
+      const detectionDocs = await db
+        .collection("events")
+        .doc(eventId)
+        .collection("detections")
+        .listDocuments();
+
+      for (const detDocRef of detectionDocs) {
+        // Dentro ogni detections/{uid}, cerca nearby vecchi
+        const oldNearby = await detDocRef
+          .collection("nearby")
+          .where("lastSeen", "<", tenMinutesAgo)
+          .get();
+
+        if (oldNearby.empty) continue;
+
+        const batch = db.batch();
+        oldNearby.docs.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+        totalDeleted += oldNearby.size;
+      }
+    }
+
+    console.log(`Cleanup completato: ${totalDeleted} detections rimosse`);
+  } catch (e) {
+    console.error("Errore cleanup:", e);
+  }
+});
+
+// ── FUNZIONE 4: cleanupStalePresence ─────────────────────
+// Marca come inattivi gli utenti il cui heartbeat è fermo da >5 min.
+// Gira ogni 5 minuti.
+exports.cleanupStalePresence = onSchedule("every 5 minutes", async () => {
+  const db = admin.firestore();
+  const fiveMinutesAgo = admin.firestore.Timestamp.fromDate(
+    new Date(Date.now() - 5 * 60 * 1000)
+  );
+
+  try {
+    const events = await db
+      .collection("events")
+      .where("isActive", "==", true)
+      .get();
+
+    let totalCleaned = 0;
+
+    for (const eventDoc of events.docs) {
+      const stale = await db
+        .collection("events")
+        .doc(eventDoc.id)
+        .collection("presence")
+        .where("isActive", "==", true)
+        .where("lastSeen", "<", fiveMinutesAgo)
+        .get();
+
+      if (stale.empty) continue;
+
+      const batch = db.batch();
+      stale.docs.forEach((d) => {
+        batch.update(d.ref, {
+          isActive: false,
+          leftAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+      await batch.commit();
+      totalCleaned += stale.size;
+    }
+
+    console.log(`Presence cleanup: ${totalCleaned} utenti marcati inattivi`);
+  } catch (e) {
+    console.error("Errore presence cleanup:", e);
+  }
 });

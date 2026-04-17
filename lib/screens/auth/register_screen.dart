@@ -10,18 +10,17 @@ class RegisterScreen extends StatefulWidget {
 
 class _RegisterScreenState extends State<RegisterScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _authService = AuthService();
 
-  final _firstNameController = TextEditingController();
-  final _lastNameController = TextEditingController();
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
-  final _confirmPasswordController = TextEditingController();
-  final _companyController = TextEditingController();
-  final _roleController = TextEditingController();
-  final _phoneController = TextEditingController();
-  final _linkedinController = TextEditingController();
-  final _bioController = TextEditingController();
+  final _firstNameCtrl = TextEditingController();
+  final _lastNameCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
+  final _passwordCtrl = TextEditingController();
+  final _confirmPasswordCtrl = TextEditingController();
+  final _companyCtrl = TextEditingController();
+  final _roleCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _linkedinCtrl = TextEditingController();
+  final _bioCtrl = TextEditingController();
 
   bool _loading = false;
   bool _obscurePassword = true;
@@ -31,16 +30,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
   @override
   void dispose() {
-    _firstNameController.dispose();
-    _lastNameController.dispose();
-    _emailController.dispose();
-    _passwordController.dispose();
-    _confirmPasswordController.dispose();
-    _companyController.dispose();
-    _roleController.dispose();
-    _phoneController.dispose();
-    _linkedinController.dispose();
-    _bioController.dispose();
+    _firstNameCtrl.dispose();
+    _lastNameCtrl.dispose();
+    _emailCtrl.dispose();
+    _passwordCtrl.dispose();
+    _confirmPasswordCtrl.dispose();
+    _companyCtrl.dispose();
+    _roleCtrl.dispose();
+    _phoneCtrl.dispose();
+    _linkedinCtrl.dispose();
+    _bioCtrl.dispose();
     super.dispose();
   }
 
@@ -53,17 +52,23 @@ class _RegisterScreenState extends State<RegisterScreen> {
     });
 
     try {
-      await _authService.register(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
-        firstName: _firstNameController.text.trim(),
-        lastName: _lastNameController.text.trim(),
-        company: _companyController.text.trim(),
-        role: _roleController.text.trim(),
-        phone: _phoneController.text.trim(),
-        linkedin: _linkedinController.text.trim(),
-        bio: _bioController.text.trim(),
+      await AuthService.instance.register(
+        email: _emailCtrl.text.trim(),
+        password: _passwordCtrl.text.trim(),
+        firstName: _firstNameCtrl.text.trim(),
+        lastName: _lastNameCtrl.text.trim(),
+        company: _companyCtrl.text.trim(),
+        role: _roleCtrl.text.trim(),
+        phone: _phoneCtrl.text.trim(),
+        linkedin: _linkedinCtrl.text.trim(),
+        bio: _bioCtrl.text.trim(),
       );
+
+      // Registrazione riuscita → torna indietro.
+      // Il StreamBuilder in main.dart rileva authStateChanges e mostra EventListScreen.
+      if (mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+      }
     } catch (e) {
       setState(() {
         _errorMessage = e.toString().contains('email-already-in-use')
@@ -71,7 +76,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
             : 'Errore durante la registrazione';
       });
     } finally {
-      setState(() => _loading = false);
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -122,7 +127,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 children: [
                   Expanded(
                     child: _buildTextField(
-                      controller: _firstNameController,
+                      controller: _firstNameCtrl,
                       label: 'Nome',
                       icon: Icons.person_outlined,
                       validator: (v) =>
@@ -132,7 +137,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: _buildTextField(
-                      controller: _lastNameController,
+                      controller: _lastNameCtrl,
                       label: 'Cognome',
                       icon: Icons.person_outlined,
                       validator: (v) =>
@@ -143,14 +148,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _companyController,
+                controller: _companyCtrl,
                 label: 'Azienda',
                 icon: Icons.business_outlined,
                 validator: (v) => v!.isEmpty ? 'Campo obbligatorio' : null,
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _roleController,
+                controller: _roleCtrl,
                 label: 'Ruolo',
                 icon: Icons.work_outlined,
                 hint: 'es. Software Engineer',
@@ -158,21 +163,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _phoneController,
+                controller: _phoneCtrl,
                 label: 'Telefono (opzionale)',
                 icon: Icons.phone_outlined,
                 keyboardType: TextInputType.phone,
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _linkedinController,
+                controller: _linkedinCtrl,
                 label: 'LinkedIn (opzionale)',
                 icon: Icons.link_outlined,
                 hint: 'es. linkedin.com/in/tuoprofilo',
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _bioController,
+                controller: _bioCtrl,
                 label: 'Bio (opzionale)',
                 icon: Icons.notes_outlined,
                 hint: 'Presentati in poche righe...',
@@ -188,7 +193,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           content: Column(
             children: [
               _buildTextField(
-                controller: _emailController,
+                controller: _emailCtrl,
                 label: 'Email',
                 icon: Icons.email_outlined,
                 keyboardType: TextInputType.emailAddress,
@@ -200,7 +205,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _passwordController,
+                controller: _passwordCtrl,
                 label: 'Password',
                 icon: Icons.lock_outlined,
                 obscure: _obscurePassword,
@@ -214,14 +219,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
               ),
               const SizedBox(height: 16),
               _buildTextField(
-                controller: _confirmPasswordController,
+                controller: _confirmPasswordCtrl,
                 label: 'Ripeti password',
                 icon: Icons.lock_outlined,
                 obscure: _obscureConfirm,
                 onToggleObscure: () =>
                     setState(() => _obscureConfirm = !_obscureConfirm),
                 validator: (v) {
-                  if (v != _passwordController.text) {
+                  if (v != _passwordCtrl.text) {
                     return 'Le password non coincidono';
                   }
                   return null;
@@ -259,7 +264,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             onPressed: () => setState(() => _currentStep++),
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10)),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
                             ),
                             child: const Text('Avanti'),
                           ),
@@ -268,14 +274,17 @@ class _RegisterScreenState extends State<RegisterScreen> {
                             onPressed: _loading ? null : _register,
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10)),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
                             ),
                             child: _loading
                                 ? const SizedBox(
                                     width: 20,
                                     height: 20,
                                     child: CircularProgressIndicator(
-                                        strokeWidth: 2, color: Colors.white),
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
                                   )
                                 : const Text('Registrati'),
                           ),
@@ -307,8 +316,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         color: theme.colorScheme.error, size: 18),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(_errorMessage!,
-                          style: TextStyle(color: theme.colorScheme.error)),
+                      child: Text(
+                        _errorMessage!,
+                        style: TextStyle(color: theme.colorScheme.error),
+                      ),
                     ),
                   ],
                 ),

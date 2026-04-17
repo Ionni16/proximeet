@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
 import '../../models/event_model.dart';
 import '../../models/user_model.dart';
 import '../../services/firestore_service.dart';
@@ -6,7 +8,6 @@ import '../../services/auth_service.dart';
 import '../../services/ble_permissions_service.dart';
 import '../../services/event_session_service.dart';
 import '../home/home_screen.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 class EventListScreen extends StatefulWidget {
   const EventListScreen({super.key});
@@ -16,7 +17,6 @@ class EventListScreen extends StatefulWidget {
 }
 
 class _EventListScreenState extends State<EventListScreen> {
-  final _authService = AuthService();
   UserModel? _currentUser;
   bool _joining = false;
 
@@ -29,9 +29,9 @@ class _EventListScreenState extends State<EventListScreen> {
   Future<void> _loadUser() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
-    final user = await _authService.getUserProfile(uid);
+    final user = await AuthService.instance.getUserProfile(uid);
     if (mounted) setState(() => _currentUser = user);
-    await _authService.saveFcmToken();
+    await AuthService.instance.saveFcmToken();
   }
 
   Future<void> _joinEvent(EventModel event) async {
@@ -39,8 +39,8 @@ class _EventListScreenState extends State<EventListScreen> {
     setState(() => _joining = true);
 
     try {
-      // 1. Controlla Bluetooth
-      final btOn = await BlePermissionsService.shared.isBluetoothOn();
+      // Bluetooth check
+      final btOn = await BlePermissionsService.instance.isBluetoothOn();
       if (!btOn && mounted) {
         final confirm = await showDialog<bool>(
           context: context,
@@ -65,7 +65,7 @@ class _EventListScreenState extends State<EventListScreen> {
           ),
         );
         if (confirm == true) {
-          await BlePermissionsService.shared.turnOnBluetooth();
+          await BlePermissionsService.instance.turnOnBluetooth();
           await Future.delayed(const Duration(seconds: 2));
         } else {
           setState(() => _joining = false);
@@ -73,15 +73,13 @@ class _EventListScreenState extends State<EventListScreen> {
         }
       }
 
-      // 2. Permessi
+      // Permessi
       final granted =
-          await BlePermissionsService.shared.requestAllPermissions();
+          await BlePermissionsService.instance.requestAllPermissions();
       if (!granted && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-              'Permessi Bluetooth negati — impossibile rilevare utenti vicini',
-            ),
+            content: Text('Permessi Bluetooth negati'),
             backgroundColor: Colors.red,
           ),
         );
@@ -89,8 +87,8 @@ class _EventListScreenState extends State<EventListScreen> {
         return;
       }
 
-      // 3. Join evento
-      final ok = await EventSessionService.shared.joinEvent(
+      // Join
+      final ok = await EventSessionService.instance.joinEvent(
         eventId: event.id,
         user: _currentUser!,
       );
@@ -144,7 +142,7 @@ class _EventListScreenState extends State<EventListScreen> {
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Esci',
-            onPressed: () => _authService.logout(),
+            onPressed: () => AuthService.instance.logout(),
           ),
         ],
       ),
@@ -153,7 +151,6 @@ class _EventListScreenState extends State<EventListScreen> {
           : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Header
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
                   child: Column(
@@ -175,13 +172,13 @@ class _EventListScreenState extends State<EventListScreen> {
                     ],
                   ),
                 ),
-
-                // Lista eventi
                 Expanded(
                   child: StreamBuilder<List<EventModel>>(
-                    stream: FirestoreService.shared.listenToActiveEvents(),
+                    stream:
+                        FirestoreService.instance.listenToActiveEvents(),
                     builder: (context, snapshot) {
-                      if (snapshot.connectionState == ConnectionState.waiting) {
+                      if (snapshot.connectionState ==
+                          ConnectionState.waiting) {
                         return const Center(
                             child: CircularProgressIndicator());
                       }
@@ -193,21 +190,19 @@ class _EventListScreenState extends State<EventListScreen> {
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(
-                                Icons.event_busy_outlined,
-                                size: 64,
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
+                              Icon(Icons.event_busy_outlined,
+                                  size: 64,
+                                  color:
+                                      theme.colorScheme.onSurfaceVariant),
                               const SizedBox(height: 16),
-                              Text(
-                                'Nessun evento attivo',
-                                style: theme.textTheme.titleMedium,
-                              ),
+                              Text('Nessun evento attivo',
+                                  style: theme.textTheme.titleMedium),
                               const SizedBox(height: 8),
                               Text(
                                 'Gli eventi disponibili appariranno qui',
                                 style: TextStyle(
-                                  color: theme.colorScheme.onSurfaceVariant,
+                                  color:
+                                      theme.colorScheme.onSurfaceVariant,
                                 ),
                               ),
                             ],
@@ -220,13 +215,11 @@ class _EventListScreenState extends State<EventListScreen> {
                         itemCount: events.length,
                         separatorBuilder: (_, __) =>
                             const SizedBox(height: 12),
-                        itemBuilder: (context, i) {
-                          return _EventCard(
-                            event: events[i],
-                            onJoin: () => _joinEvent(events[i]),
-                            isJoining: _joining,
-                          );
-                        },
+                        itemBuilder: (context, i) => _EventCard(
+                          event: events[i],
+                          onJoin: () => _joinEvent(events[i]),
+                          isJoining: _joining,
+                        ),
                       );
                     },
                   ),
@@ -271,36 +264,32 @@ class _EventCard extends StatelessWidget {
                   color: theme.colorScheme.primaryContainer,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Icon(
-                  Icons.event,
-                  color: theme.colorScheme.primary,
-                ),
+                child: Icon(Icons.event,
+                    color: theme.colorScheme.primary),
               ),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      event.name,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                      ),
-                    ),
+                    Text(event.name,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16)),
                     const SizedBox(height: 2),
                     Row(
                       children: [
                         Icon(Icons.location_on_outlined,
                             size: 14,
-                            color: theme.colorScheme.onSurfaceVariant),
+                            color:
+                                theme.colorScheme.onSurfaceVariant),
                         const SizedBox(width: 4),
-                        Text(
-                          event.location,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
+                        Expanded(
+                          child: Text(event.location,
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  color: theme.colorScheme
+                                      .onSurfaceVariant),
+                              overflow: TextOverflow.ellipsis),
                         ),
                       ],
                     ),
@@ -311,25 +300,19 @@ class _EventCard extends StatelessWidget {
           ),
           if (event.description.isNotEmpty) ...[
             const SizedBox(height: 12),
-            Text(
-              event.description,
-              style: TextStyle(
-                fontSize: 13,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
+            Text(event.description,
+                style: TextStyle(
+                    fontSize: 13,
+                    color: theme.colorScheme.onSurfaceVariant),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis),
           ],
           const SizedBox(height: 16),
-
-          // Conteggio presenti + bottone
           Row(
             children: [
-              // Partecipanti attivi
               StreamBuilder<int>(
-                stream:
-                    FirestoreService.shared.listenToActiveCount(event.id),
+                stream: FirestoreService.instance
+                    .listenToActiveCount(event.id),
                 builder: (context, snap) {
                   final count = snap.data ?? 0;
                   return Container(
@@ -343,42 +326,33 @@ class _EventCard extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(Icons.people_outline,
-                            size: 14, color: theme.colorScheme.primary),
+                            size: 14,
+                            color: theme.colorScheme.primary),
                         const SizedBox(width: 4),
-                        Text(
-                          '$count presenti',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: theme.colorScheme.primary,
-                          ),
-                        ),
+                        Text('$count presenti',
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: theme.colorScheme.primary)),
                       ],
                     ),
                   );
                 },
               ),
-
               const Spacer(),
-
-              // Bottone entra
               FilledButton.icon(
                 icon: isJoining
                     ? const SizedBox(
                         width: 16,
                         height: 16,
                         child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
+                            strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.login, size: 18),
                 label: Text(isJoining ? 'Ingresso...' : 'Entra'),
                 onPressed: isJoining ? null : onJoin,
                 style: FilledButton.styleFrom(
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+                      borderRadius: BorderRadius.circular(10)),
                 ),
               ),
             ],

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+
 import 'firebase_options.dart';
+import 'core/constants.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/events/event_list_screen.dart';
 import 'services/event_session_service.dart';
@@ -35,29 +37,30 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
     super.dispose();
   }
 
-  /// Best-effort cleanup quando l'app viene chiusa.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.detached) {
-      EventSessionService.shared.leaveEvent();
+      EventSessionService.instance.leaveEvent();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    const seedColor = Color(AppConstants.primarySeedColor);
+
     return MaterialApp(
       title: 'ProxiMeet',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1D9E75),
+          seedColor: seedColor,
           brightness: Brightness.light,
         ),
         useMaterial3: true,
       ),
       darkTheme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1D9E75),
+          seedColor: seedColor,
           brightness: Brightness.dark,
         ),
         useMaterial3: true,
@@ -71,13 +74,7 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
               body: Center(child: CircularProgressIndicator()),
             );
           }
-
-          // Autenticato → lista eventi
-          if (snapshot.hasData) {
-            return const EventListScreen();
-          }
-
-          // Non autenticato → login
+          if (snapshot.hasData) return const EventListScreen();
           return const LoginScreen();
         },
       ),

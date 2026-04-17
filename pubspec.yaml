@@ -19,7 +19,7 @@ dependencies:
   firebase_storage: ^12.4.5
   firebase_messaging: ^15.2.5
 
-  #permessi
+  # Permessi
   permission_handler: ^11.3.1
   device_info_plus: ^10.1.0
 
@@ -31,21 +31,13 @@ dependencies:
   mobile_scanner: ^7.0.0
   qr_flutter: ^4.1.0
 
-  # Auth providers
-  google_sign_in: ^6.2.2
-
-  # Storage locale wallet offline
-  hive_flutter: ^1.1.0
-
-  # Immagini
+  # Immagini (CachedNetworkImage usato in UserAvatar)
   cached_network_image: ^3.4.1
   image_picker: ^1.1.2
-  animated_text_kit: ^4.2.3
 
   # Utility
   intl: ^0.20.2
   uuid: ^4.5.1
-  crypto: ^3.0.3
 
 dev_dependencies:
   flutter_test:

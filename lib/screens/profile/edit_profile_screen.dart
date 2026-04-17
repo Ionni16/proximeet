@@ -13,7 +13,7 @@ class EditProfileScreen extends StatefulWidget {
 
 class _EditProfileScreenState extends State<EditProfileScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _authService = AuthService();
+  final _authService = AuthService.instance;
   bool _loading = false;
 
   late final TextEditingController _firstNameController;
