@@ -1,9 +1,17 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import '../models/user_model.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 
+import '../core/logger.dart';
+import '../models/user_model.dart';
+
+/// Servizio autenticazione e gestione profilo utente.
+///
+/// Singleton: usa [AuthService.instance].
 class AuthService {
+  AuthService._();
+  static final AuthService instance = AuthService._();
+
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
@@ -79,7 +87,7 @@ class AuthService {
         await _db.collection('users').doc(uid).update({'fcmToken': token});
       }
     } catch (e) {
-      print('[FCM] Errore: $e');
+      Log.e('AUTH', 'Errore salvataggio FCM token', e);
     }
   }
 }

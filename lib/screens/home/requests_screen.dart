@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../services/firestore_service.dart';
 import '../../models/connection_model.dart';
+import '../../widgets/user_avatar.dart';
 
 class RequestsScreen extends StatelessWidget {
   const RequestsScreen({super.key});
@@ -15,7 +16,7 @@ class RequestsScreen extends StatelessWidget {
         centerTitle: true,
       ),
       body: StreamBuilder<List<ConnectionRequest>>(
-        stream: FirestoreService.shared.listenToIncomingRequests(),
+        stream: FirestoreService.instance.listenToIncomingRequests(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -29,15 +30,16 @@ class RequestsScreen extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(Icons.inbox_outlined,
-                      size: 64, color: theme.colorScheme.onSurfaceVariant),
+                      size: 56, color: theme.colorScheme.onSurfaceVariant),
                   const SizedBox(height: 16),
                   Text('Nessuna richiesta',
                       style: theme.textTheme.titleMedium),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   Text(
                     'Le richieste di biglietto appariranno qui',
-                    style: theme.textTheme.bodyMedium?.copyWith(
+                    style: TextStyle(
                       color: theme.colorScheme.onSurfaceVariant,
+                      fontSize: 13,
                     ),
                   ),
                 ],
@@ -68,6 +70,8 @@ class _RequestCard extends StatefulWidget {
 class _RequestCardState extends State<_RequestCard> {
   bool _loading = false;
   String? _senderName;
+  String? _senderRole;
+  String? _senderCompany;
 
   @override
   void initState() {
@@ -76,11 +80,13 @@ class _RequestCardState extends State<_RequestCard> {
   }
 
   Future<void> _loadSender() async {
-    final user =
-        await FirestoreService.shared.getUserByUid(widget.request.senderUid);
+    final user = await FirestoreService.instance
+        .getUserByUid(widget.request.senderUid);
     if (mounted) {
       setState(() {
         _senderName = user?.fullName ?? 'Utente sconosciuto';
+        _senderRole = user?.role ?? '';
+        _senderCompany = user?.company ?? '';
       });
     }
   }
@@ -88,7 +94,7 @@ class _RequestCardState extends State<_RequestCard> {
   Future<void> _respond(bool accepted) async {
     setState(() => _loading = true);
     try {
-      await FirestoreService.shared.respondToRequest(
+      await FirestoreService.instance.respondToRequest(
         widget.request.id,
         accepted,
       );
@@ -97,7 +103,7 @@ class _RequestCardState extends State<_RequestCard> {
           SnackBar(
             content: Text(
               accepted
-                  ? 'Biglietto accettato — contatto salvato nel wallet!'
+                  ? 'Biglietto accettato — contatto salvato!'
                   : 'Richiesta rifiutata',
             ),
             backgroundColor: accepted
@@ -132,25 +138,9 @@ class _RequestCardState extends State<_RequestCard> {
         children: [
           Row(
             children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer,
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: Text(
-                    _senderName?.isNotEmpty == true
-                        ? _senderName![0].toUpperCase()
-                        : '?',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                ),
+              UserAvatar(
+                name: _senderName ?? '?',
+                size: 52,
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -162,6 +152,17 @@ class _RequestCardState extends State<_RequestCard> {
                       style: const TextStyle(
                           fontWeight: FontWeight.bold, fontSize: 15),
                     ),
+                    if (_senderRole != null &&
+                        _senderRole!.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        '${_senderRole!} · ${_senderCompany!}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 4),
                     Text(
                       'Vuole scambiare il biglietto con te',

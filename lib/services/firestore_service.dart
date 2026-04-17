@@ -1,14 +1,20 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+
+import '../core/constants.dart';
+import '../core/logger.dart';
 import '../models/user_model.dart';
 import '../models/event_model.dart';
 import '../models/connection_model.dart';
 import 'nearby_detection_service.dart';
 import 'event_session_service.dart';
 
+/// Servizio Firestore centralizzato.
+///
+/// Singleton: usa [FirestoreService.instance].
 class FirestoreService {
-  static final FirestoreService shared = FirestoreService._();
   FirestoreService._();
+  static final FirestoreService instance = FirestoreService._();
 
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
@@ -22,7 +28,6 @@ class FirestoreService {
 
   // ── EVENTI ──────────────────────────────────────────────
 
-  /// Stream di eventi attivi.
   Stream<List<EventModel>> listenToActiveEvents() {
     return _db
         .collection('events')
@@ -32,18 +37,18 @@ class FirestoreService {
             snap.docs.map((d) => EventModel.fromMap(d.id, d.data())).toList());
   }
 
-  /// Singolo evento per id.
   Future<EventModel?> getEvent(String eventId) async {
     final doc = await _db.collection('events').doc(eventId).get();
     if (!doc.exists) return null;
     return EventModel.fromMap(doc.id, doc.data()!);
   }
 
-  /// Conteggio presenti attivi ad un evento (per la UI lista eventi).
+  /// Conteggio presenti attivi — filtra solo `isActive == true`.
+  ///
+  /// FIX: il vecchio codice calcolava `twoMinAgo` una volta sola
+  /// al momento della subscription. Ora filtriamo solo per isActive
+  /// che viene aggiornato dal heartbeat e dal leave.
   Stream<int> listenToActiveCount(String eventId) {
-    final twoMinAgo = Timestamp.fromDate(
-      DateTime.now().subtract(const Duration(minutes: 2)),
-    );
     return _db
         .collection('events')
         .doc(eventId)
@@ -55,19 +60,22 @@ class FirestoreService {
 
   // ── RICHIESTE CONTATTO ──────────────────────────────────
 
-  /// Invia richiesta contatto. GATED: solo se l'utente è nearby recente.
+  /// Invia richiesta contatto. Gated: solo se l'utente è nearby.
   Future<void> sendConnectionRequest(String targetUid) async {
     final myUid = FirebaseAuth.instance.currentUser?.uid;
     if (myUid == null) throw Exception('Non autenticato');
 
-    final eventId = EventSessionService.shared.currentEventId;
+    final eventId = EventSessionService.instance.currentEventId;
     if (eventId == null) throw Exception('Non sei in nessun evento');
 
-    // GATING: verifica che targetUid sia stato rilevato via BLE di recente
-    final isNearby =
-        NearbyDetectionService.shared.isRecentlyDetected(targetUid);
+    // Gating BLE: verifica vicinanza
+    final isNearby = NearbyDetectionService.instance.isRecentlyDetected(
+      targetUid,
+      maxSeconds: AppConstants.contactGatingSeconds,
+    );
+
     if (!isNearby) {
-      // Fallback: controlla su Firestore
+      // Fallback Firestore
       final det = await _db
           .collection('events')
           .doc(eventId)
@@ -82,12 +90,13 @@ class FirestoreService {
       }
       final lastSeen = det.data()?['lastSeen'] as Timestamp?;
       if (lastSeen == null ||
-          DateTime.now().difference(lastSeen.toDate()).inSeconds > 120) {
+          DateTime.now().difference(lastSeen.toDate()).inSeconds >
+              AppConstants.contactGatingSeconds) {
         throw Exception('Utente non più nelle vicinanze');
       }
     }
 
-    // Controlla se già esiste una richiesta
+    // Check duplicati
     final existingId = '${myUid}_${targetUid}_$eventId';
     final existing =
         await _db.collection('connectionRequests').doc(existingId).get();
@@ -107,6 +116,10 @@ class FirestoreService {
   }
 
   /// Rispondi a richiesta.
+  ///
+  /// FIX: il wallet viene scritto SOLO qui (client-side).
+  /// La Cloud Function gestisce solo notifiche push — non scrive wallet,
+  /// così evitiamo duplicati.
   Future<void> respondToRequest(String requestId, bool accepted) async {
     await _db.collection('connectionRequests').doc(requestId).update({
       'status': accepted ? 'accepted' : 'rejected',
@@ -121,7 +134,6 @@ class FirestoreService {
       final receiverUid = data['receiverUid'] as String;
       final eventId = data['eventId'] as String? ?? '';
 
-      // Recupera nome evento
       String eventName = '';
       if (eventId.isNotEmpty) {
         final ev = await getEvent(eventId);
@@ -134,9 +146,12 @@ class FirestoreService {
   }
 
   Future<void> _saveToWallet(
-      String ownerUid, String contactUid, String eventName) async {
-    final contactProfile = await getUserByUid(contactUid);
-    if (contactProfile == null) return;
+    String ownerUid,
+    String contactUid,
+    String eventName,
+  ) async {
+    final profile = await getUserByUid(contactUid);
+    if (profile == null) return;
 
     await _db
         .collection('connections')
@@ -145,21 +160,20 @@ class FirestoreService {
         .doc(contactUid)
         .set({
       'uid': contactUid,
-      'firstName': contactProfile.firstName,
-      'lastName': contactProfile.lastName,
-      'company': contactProfile.company,
-      'role': contactProfile.role,
-      'email': contactProfile.email,
-      'phone': contactProfile.phone ?? '',
-      'linkedin': contactProfile.linkedin ?? '',
-      'avatarURL': contactProfile.avatarURL,
+      'firstName': profile.firstName,
+      'lastName': profile.lastName,
+      'company': profile.company,
+      'role': profile.role,
+      'email': profile.email,
+      'phone': profile.phone ?? '',
+      'linkedin': profile.linkedin ?? '',
+      'avatarURL': profile.avatarURL,
       'connectedAt': FieldValue.serverTimestamp(),
       'eventName': eventName,
       'note': '',
     });
   }
 
-  /// Ascolta richieste in arrivo per l'evento corrente.
   Stream<List<ConnectionRequest>> listenToIncomingRequests() {
     final myUid = FirebaseAuth.instance.currentUser?.uid;
     if (myUid == null) return Stream.value([]);

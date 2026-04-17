@@ -1,3 +1,5 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 class UserModel {
   final String uid;
   final String firstName;
@@ -31,6 +33,7 @@ class UserModel {
 
   String get fullName => '$firstName $lastName';
 
+  /// Per Firestore — usa Timestamp, non ISO string.
   Map<String, dynamic> toMap() {
     return {
       'uid': uid,
@@ -40,12 +43,12 @@ class UserModel {
       'company': company,
       'role': role,
       'avatarURL': avatarURL,
-      'linkedin': linkedin,
-      'github': github,
-      'twitter': twitter,
-      'phone': phone,
-      'bio': bio,
-      'createdAt': createdAt.toIso8601String(),
+      'linkedin': linkedin ?? '',
+      'github': github ?? '',
+      'twitter': twitter ?? '',
+      'phone': phone ?? '',
+      'bio': bio ?? '',
+      'createdAt': Timestamp.fromDate(createdAt),
     };
   }
 
@@ -58,18 +61,16 @@ class UserModel {
       company: map['company'] ?? '',
       role: map['role'] ?? '',
       avatarURL: map['avatarURL'] ?? '',
-      linkedin: map['linkedin'],
-      github: map['github'],
-      twitter: map['twitter'],
-      phone: map['phone'],
-      bio: map['bio'],
-      createdAt: DateTime.parse(
-        map['createdAt'] ?? DateTime.now().toIso8601String(),
-      ),
+      linkedin: _nonEmpty(map['linkedin']),
+      github: _nonEmpty(map['github']),
+      twitter: _nonEmpty(map['twitter']),
+      phone: _nonEmpty(map['phone']),
+      bio: _nonEmpty(map['bio']),
+      createdAt: _parseDateTime(map['createdAt']),
     );
   }
 
-  /// Summary compatto per bleMapping / presence
+  /// Summary compatto per bleMapping / presence.
   Map<String, dynamic> toSummary() {
     return {
       'uid': uid,
@@ -77,6 +78,24 @@ class UserModel {
       'company': company,
       'role': role,
       'avatarURL': avatarURL,
+      'bio': bio ?? '',
+      'email': email,
+      'linkedin': linkedin ?? '',
+      'phone': phone ?? '',
     };
+  }
+
+  /// Restituisce null se la stringa è vuota o null.
+  static String? _nonEmpty(dynamic value) {
+    if (value == null) return null;
+    final s = value.toString();
+    return s.isEmpty ? null : s;
+  }
+
+  /// Gestisce sia Timestamp Firestore che ISO string.
+  static DateTime _parseDateTime(dynamic value) {
+    if (value is Timestamp) return value.toDate();
+    if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+    return DateTime.now();
   }
 }
