@@ -23,13 +23,13 @@
 
 	<!-- (OPZIONALE) Background BLE - per futuro supporto background -->
 	<!-- Decommenta se vuoi abilitare scanning in background -->
-	<!--
+	
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
 		<string>bluetooth-peripheral</string>
 	</array>
-	-->
+	
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
