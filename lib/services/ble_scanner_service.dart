@@ -55,10 +55,14 @@ class BleScannerService {
         await FlutterBluePlus.stopScan();
       }
 
+      // IMPORTANTE: NESSUN filtro withServices.
+      // Su iOS il filtro perde i dispositivi Android che mettono il
+      // serviceUUID nello scan response (pacchetto primario pieno).
+      // Filtriamo noi via prefix "PM-" in _extractSessionBleId.
       await FlutterBluePlus.startScan(
-        withServices: [Guid(AppConstants.bleServiceUuid)],
         timeout: Duration(seconds: durationSeconds),
         continuousUpdates: true,
+        androidScanMode: AndroidScanMode.lowLatency,
       );
     } catch (e) {
       Log.e('BLE-SCAN', 'Errore scan', e);

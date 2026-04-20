@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
+import '../events/event_list_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -64,12 +65,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
         bio: _bioCtrl.text.trim(),
       );
 
-      // Registrazione riuscita → torna indietro.
-      // Il StreamBuilder in main.dart rileva authStateChanges e mostra EventListScreen.
+      // Registrazione riuscita → vai DIRETTAMENTE alla EventListScreen
+      // e rimuovi tutto lo stack di navigazione (Login + Register).
+      // Più affidabile del popUntil che dipende dal timing di authStateChanges.
       if (mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const EventListScreen()),
+          (route) => false,
+        );
       }
-    } catch (e) {
+    } catch (e) { {
       setState(() {
         _errorMessage = e.toString().contains('email-already-in-use')
             ? 'Email già registrata'
