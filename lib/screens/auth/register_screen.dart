@@ -74,7 +74,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
           (route) => false,
         );
       }
-    } catch (e) { {
+    } catch (e) {
       setState(() {
         _errorMessage = e.toString().contains('email-already-in-use')
             ? 'Email già registrata'
