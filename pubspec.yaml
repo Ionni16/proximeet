@@ -2,7 +2,7 @@ name: proximeeet_app
 description: "ProxiMeet - Proximity networking for conferences"
 publish_to: 'none'
 
-version: 1.0.0+3
+version: 1.0.0+4
 
 environment:
   sdk: ^3.11.4
