@@ -48,29 +48,20 @@ class BlePermissionsService {
   }
 
   Future<bool> _requestIOS() async {
-    // Su iOS il permesso BLE è gestito da CoreBluetooth automaticamente.
-    // Richiediamo solo la location esplicitamente.
-    final locStatus = await Permission.locationWhenInUse.request();
-
-    final locGranted = locStatus == PermissionStatus.granted ||
-        locStatus == PermissionStatus.limited;
-
-    // Per il BLE, ci fidiamo dello stato dell'adapter
-    // (già verificato da isBluetoothOn() prima di arrivare qui)
+    // iOS 13+: BLE non richiede location permission.
+    // CoreBluetooth gestisce il permesso automaticamente al primo uso.
+    // Basta verificare che il Bluetooth sia acceso.
     final bleState = await FlutterBluePlus.adapterState.first;
-    final bleOk = bleState == BluetoothAdapterState.on ||
-        bleState == BluetoothAdapterState.unknown ||
-        bleState == BluetoothAdapterState.unauthorized; // unauthorized = chiederà al primo uso
+    final bleOk = bleState == BluetoothAdapterState.on;
 
-    Log.d('BLE-PERM', 'iOS: loc=$locStatus ble=$bleState → ${locGranted && bleOk}');
-    return locGranted && bleOk;
+    Log.d('BLE-PERM', 'iOS: bleState=$bleState → $bleOk');
+    return bleOk;
   }
 
   Future<bool> arePermissionsGranted() async {
     if (Platform.isIOS) {
-      final loc = await Permission.locationWhenInUse.isGranted;
       final bleState = await FlutterBluePlus.adapterState.first;
-      return loc && bleState == BluetoothAdapterState.on;
+      return bleState == BluetoothAdapterState.on;
     }
     final scan = await Permission.bluetoothScan.isGranted;
     final adv = await Permission.bluetoothAdvertise.isGranted;
