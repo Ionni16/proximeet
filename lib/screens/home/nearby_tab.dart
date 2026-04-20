@@ -116,20 +116,21 @@ class _NearbyTabState extends State<NearbyTab> {
           ),
         ),
 
+        
         // ── Contenuto ──
         Expanded(
-          child: _nearbyUsers.isEmpty
-              ? _EmptyState(theme: theme)
-              : _viewMode == _ViewMode.radar
-                  ? RadarView(
-                      currentUser: widget.currentUser,
-                      nearbyUsers: _nearbyUsers,
-                      onUserTap: _onUserTap,
-                    )
+          child: _viewMode == _ViewMode.radar
+              ? RadarView(
+                  currentUser: widget.currentUser,
+                  nearbyUsers: _nearbyUsers,
+                  onUserTap: _onUserTap,
+                )
+              : (_nearbyUsers.isEmpty
+                  ? _EmptyState(theme: theme)
                   : NearbyListView(
                       nearbyUsers: _nearbyUsers,
                       onUserTap: _onUserTap,
-                    ),
+                    )),
         ),
       ],
     );
