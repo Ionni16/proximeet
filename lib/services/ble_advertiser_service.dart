@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
 import '../core/constants.dart';
@@ -7,10 +6,11 @@ import '../core/logger.dart';
 
 /// BLE Advertising cross-platform (Android + iOS).
 ///
-/// SOLUZIONE iOS:
-/// Apple ignora manufacturer data nei pacchetti BLE.
-/// Usiamo il local name con prefix "PM-" come carrier del sessionBleId.
-/// Su Android aggiungiamo anche manufacturer data come ridondanza.
+/// Strategia robusta:
+/// - trasportiamo il sessionBleId SOLO nel localName: "PM-<id>"
+/// - NON usiamo serviceUuid / manufacturerData / serviceData
+///   perché su Android riempiono il pacchetto e spesso spostano il nome
+///   nello scan response, che iOS non sempre espone come ci serve.
 ///
 /// Singleton: usa [BleAdvertiserService.instance].
 class BleAdvertiserService {
@@ -34,26 +34,29 @@ class BleAdvertiserService {
         return false;
       }
 
+      final localName = '${AppConstants.bleNamePrefix}$sessionBleId';
+
       if (Platform.isIOS) {
-        return await _startIOS(sessionBleId);
+        await _startIOS(localName);
       } else {
-        return await _startAndroid(sessionBleId);
+        await _startAndroid(localName);
       }
+
+      _isAdvertising = true;
+      _currentSessionBleId = sessionBleId;
+      Log.d('BLE-ADV', 'Avviato: $localName');
+      return true;
     } catch (e) {
       Log.e('BLE-ADV', 'Errore start', e);
       _isAdvertising = false;
+      _currentSessionBleId = null;
       return false;
     }
   }
 
-  Future<bool> _startAndroid(String sessionBleId) async {
-    final sessionBytes = _hexToBytes(sessionBleId);
-
+  Future<void> _startAndroid(String localName) async {
     final advertiseData = AdvertiseData(
-      serviceUuid: AppConstants.bleServiceUuid,
-      manufacturerId: AppConstants.bleManufacturerId,
-      manufacturerData: sessionBytes,
-      localName: '${AppConstants.bleNamePrefix}$sessionBleId',
+      localName: localName,
       includeDeviceName: false,
     );
 
@@ -68,46 +71,28 @@ class BleAdvertiserService {
       advertiseData: advertiseData,
       advertiseSettings: advertiseSettings,
     );
-
-    _isAdvertising = true;
-    _currentSessionBleId = sessionBleId;
-    Log.d('BLE-ADV', 'Android avviato: $sessionBleId');
-    return true;
   }
 
-  Future<bool> _startIOS(String sessionBleId) async {
+  Future<void> _startIOS(String localName) async {
     final advertiseData = AdvertiseData(
-      serviceUuid: AppConstants.bleServiceUuid,
-      localName: '${AppConstants.bleNamePrefix}$sessionBleId',
+      localName: localName,
       includeDeviceName: false,
     );
 
     await _peripheral.start(advertiseData: advertiseData);
-
-    _isAdvertising = true;
-    _currentSessionBleId = sessionBleId;
-    Log.d('BLE-ADV', 'iOS avviato: $sessionBleId');
-    return true;
   }
 
   Future<void> stop() async {
     if (!_isAdvertising) return;
+
     try {
       await _peripheral.stop();
     } catch (e) {
       Log.e('BLE-ADV', 'Errore stop', e);
     }
+
     _isAdvertising = false;
     _currentSessionBleId = null;
     Log.d('BLE-ADV', 'Fermato');
-  }
-
-  Uint8List _hexToBytes(String hex) {
-    final result = <int>[];
-    for (var i = 0; i < hex.length; i += 2) {
-      final end = (i + 2 <= hex.length) ? i + 2 : hex.length;
-      result.add(int.parse(hex.substring(i, end), radix: 16));
-    }
-    return Uint8List.fromList(result);
   }
 }

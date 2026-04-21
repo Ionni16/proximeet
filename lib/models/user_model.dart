@@ -31,36 +31,41 @@ class UserModel {
     required this.createdAt,
   });
 
-  String get fullName => '$firstName $lastName';
+  String get fullName {
+    final parts = [firstName.trim(), lastName.trim()]
+        .where((p) => p.isNotEmpty)
+        .toList();
+    return parts.join(' ');
+  }
 
   /// Per Firestore — usa Timestamp, non ISO string.
   Map<String, dynamic> toMap() {
     return {
-      'uid': uid,
-      'firstName': firstName,
-      'lastName': lastName,
-      'email': email,
-      'company': company,
-      'role': role,
-      'avatarURL': avatarURL,
-      'linkedin': linkedin ?? '',
-      'github': github ?? '',
-      'twitter': twitter ?? '',
-      'phone': phone ?? '',
-      'bio': bio ?? '',
+      'uid': uid.trim(),
+      'firstName': firstName.trim(),
+      'lastName': lastName.trim(),
+      'email': email.trim().toLowerCase(),
+      'company': company.trim(),
+      'role': role.trim(),
+      'avatarURL': avatarURL.trim(),
+      'linkedin': _normalizedOptional(linkedin),
+      'github': _normalizedOptional(github),
+      'twitter': _normalizedOptional(twitter),
+      'phone': _normalizedOptional(phone),
+      'bio': _normalizedOptional(bio),
       'createdAt': Timestamp.fromDate(createdAt),
     };
   }
 
   factory UserModel.fromMap(Map<String, dynamic> map) {
     return UserModel(
-      uid: map['uid'] ?? '',
-      firstName: map['firstName'] ?? '',
-      lastName: map['lastName'] ?? '',
-      email: map['email'] ?? '',
-      company: map['company'] ?? '',
-      role: map['role'] ?? '',
-      avatarURL: map['avatarURL'] ?? '',
+      uid: _stringOrEmpty(map['uid']),
+      firstName: _stringOrEmpty(map['firstName']),
+      lastName: _stringOrEmpty(map['lastName']),
+      email: _stringOrEmpty(map['email']).toLowerCase(),
+      company: _stringOrEmpty(map['company']),
+      role: _stringOrEmpty(map['role']),
+      avatarURL: _stringOrEmpty(map['avatarURL']),
       linkedin: _nonEmpty(map['linkedin']),
       github: _nonEmpty(map['github']),
       twitter: _nonEmpty(map['twitter']),
@@ -70,25 +75,50 @@ class UserModel {
     );
   }
 
-  /// Summary compatto per bleMapping / presence.
+  /// Summary pubblico compatto per bleMapping / nearby.
   Map<String, dynamic> toSummary() {
     return {
-      'uid': uid,
+      'uid': uid.trim(),
       'displayName': fullName,
-      'company': company,
-      'role': role,
-      'avatarURL': avatarURL,
-      'bio': bio ?? '',
-      'email': email,
-      'linkedin': linkedin ?? '',
-      'phone': phone ?? '',
+      'company': company.trim(),
+      'role': role.trim(),
+      'avatarURL': avatarURL.trim(),
+      'bio': (bio ?? '').trim(),
     };
+  }
+
+  /// Dati contatto completi utili per wallet / connessioni salvate.
+  Map<String, dynamic> toWalletContactData() {
+    return {
+      'uid': uid.trim(),
+      'firstName': firstName.trim(),
+      'lastName': lastName.trim(),
+      'displayName': fullName,
+      'company': company.trim(),
+      'role': role.trim(),
+      'email': email.trim().toLowerCase(),
+      'phone': _normalizedOptional(phone),
+      'linkedin': _normalizedOptional(linkedin),
+      'github': _normalizedOptional(github),
+      'twitter': _normalizedOptional(twitter),
+      'avatarURL': avatarURL.trim(),
+      'bio': _normalizedOptional(bio),
+    };
+  }
+
+  static String _stringOrEmpty(dynamic value) {
+    if (value == null) return '';
+    return value.toString().trim();
+  }
+
+  static String _normalizedOptional(String? value) {
+    return value?.trim() ?? '';
   }
 
   /// Restituisce null se la stringa è vuota o null.
   static String? _nonEmpty(dynamic value) {
     if (value == null) return null;
-    final s = value.toString();
+    final s = value.toString().trim();
     return s.isEmpty ? null : s;
   }
 

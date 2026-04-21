@@ -156,7 +156,7 @@ class _RequestCardState extends State<_RequestCard> {
                         _senderRole!.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Text(
-                        '${_senderRole!} · ${_senderCompany!}',
+                        '${_senderRole ?? ''} · ${_senderCompany ?? ''}',
                         style: TextStyle(
                           fontSize: 12,
                           color: theme.colorScheme.onSurfaceVariant,
