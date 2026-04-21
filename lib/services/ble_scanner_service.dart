@@ -7,17 +7,18 @@ import '../models/nearby_user.dart';
 
 /// BLE Scanner cross-platform (Android + iOS).
 ///
-/// Estrae il sessionBleId da multiple sorgenti:
-/// 1. Manufacturer data (0xFF01) — Android→Android
-/// 2. Local name con prefix "PM-" — cross-platform
+/// Strategia robusta:
+/// 1. Local name con prefix "PM-"
+/// 2. platformName con prefix "PM-" come fallback
 ///
-/// Singleton: usa [BleScannerService.instance].
+/// Non usiamo più manufacturer/service UUID come canale principale,
+/// perché il payload advertising deve restare minimale e simmetrico.
 class BleScannerService {
   BleScannerService._();
   static final BleScannerService instance = BleScannerService._();
 
   final _detectedController = StreamController<RawBleDetection>.broadcast();
-  StreamSubscription? _scanResultsSub;
+  StreamSubscription<List<ScanResult>>? _scanResultsSub;
   Timer? _scanTimer;
   bool _isScanning = false;
   String? _mySessionBleId;
@@ -32,10 +33,14 @@ class BleScannerService {
     int scanDurationSeconds = AppConstants.scanDurationSeconds,
   }) async {
     if (_isScanning) return;
+
     _isScanning = true;
     _mySessionBleId = mySessionBleId;
 
-    _scanResultsSub = FlutterBluePlus.scanResults.listen(_processScanResults);
+    _scanResultsSub = FlutterBluePlus.scanResults.listen(
+      _processScanResults,
+      onError: (e) => Log.e('BLE-SCAN', 'Errore stream scanResults', e),
+    );
 
     await _doScan(scanDurationSeconds);
 
@@ -44,7 +49,10 @@ class BleScannerService {
       (_) => _doScan(scanDurationSeconds),
     );
 
-    Log.d('BLE-SCAN', 'Avviato (ogni ${intervalSeconds}s, durata ${scanDurationSeconds}s)');
+    Log.d(
+      'BLE-SCAN',
+      'Avviato (ogni ${intervalSeconds}s, durata ${scanDurationSeconds}s)',
+    );
   }
 
   Future<void> _doScan(int durationSeconds) async {
@@ -55,10 +63,6 @@ class BleScannerService {
         await FlutterBluePlus.stopScan();
       }
 
-      // IMPORTANTE: NESSUN filtro withServices.
-      // Su iOS il filtro perde i dispositivi Android che mettono il
-      // serviceUUID nello scan response (pacchetto primario pieno).
-      // Filtriamo noi via prefix "PM-" in _extractSessionBleId.
       await FlutterBluePlus.startScan(
         timeout: Duration(seconds: durationSeconds),
         continuousUpdates: true,
@@ -72,61 +76,46 @@ class BleScannerService {
   void _processScanResults(List<ScanResult> results) {
     for (final result in results) {
       final sessionBleId = _extractSessionBleId(result);
-      if (sessionBleId == null) continue;
+
+      if (sessionBleId == null) {
+        _logRawAdvertisement(result, parsedId: null);
+        continue;
+      }
+
       if (sessionBleId == _mySessionBleId) continue;
       if (_seenThisCycle.contains(sessionBleId)) continue;
 
       _seenThisCycle.add(sessionBleId);
 
-      _detectedController.add(RawBleDetection(
-        sessionBleId: sessionBleId,
-        rssi: result.rssi,
-        timestamp: DateTime.now(),
-      ));
+      _detectedController.add(
+        RawBleDetection(
+          sessionBleId: sessionBleId,
+          rssi: result.rssi,
+          timestamp: DateTime.now(),
+        ),
+      );
 
-      Log.d('BLE-SCAN',
-          'Rilevato: $sessionBleId RSSI=${result.rssi} device=${result.device.platformName}');
+      _logRawAdvertisement(result, parsedId: sessionBleId);
+
+      Log.d(
+        'BLE-SCAN',
+        'Rilevato: $sessionBleId RSSI=${result.rssi} device=${result.device.platformName}',
+      );
     }
   }
 
-  /// Estrai sessionBleId dal pacchetto BLE.
-  ///
-  /// Ordine di priorità:
-  /// 1. Manufacturer data con key 0xFF01
-  /// 2. Qualsiasi manufacturer data
-  /// 3. Local name con prefix "PM-"
-  /// 4. platformName con prefix "PM-"
   String? _extractSessionBleId(ScanResult result) {
     final ad = result.advertisementData;
     const prefix = AppConstants.bleNamePrefix;
     const idLen = AppConstants.sessionBleIdLength;
     final minNameLen = prefix.length + idLen;
 
-    // Strategia 1: Manufacturer data
-    if (ad.manufacturerData.isNotEmpty) {
-      final data = ad.manufacturerData[AppConstants.bleManufacturerId];
-      if (data != null && data.length >= 8) {
-        final hex = data.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-        if (hex.length >= idLen) return hex.substring(0, idLen);
-      }
-
-      for (final entry in ad.manufacturerData.entries) {
-        if (entry.value.length >= 8) {
-          final hex =
-              entry.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-          if (hex.length >= idLen) return hex.substring(0, idLen);
-        }
-      }
+    final advName = ad.advName.trim();
+    if (advName.startsWith(prefix) && advName.length >= minNameLen) {
+      return advName.substring(prefix.length, prefix.length + idLen);
     }
 
-    // Strategia 2: Local name
-    final localName = ad.advName;
-    if (localName.startsWith(prefix) && localName.length >= minNameLen) {
-      return localName.substring(prefix.length, prefix.length + idLen);
-    }
-
-    // Strategia 3: platformName
-    final platformName = result.device.platformName;
+    final platformName = result.device.platformName.trim();
     if (platformName.startsWith(prefix) && platformName.length >= minNameLen) {
       return platformName.substring(prefix.length, prefix.length + idLen);
     }
@@ -134,11 +123,28 @@ class BleScannerService {
     return null;
   }
 
+  void _logRawAdvertisement(ScanResult result, {required String? parsedId}) {
+    final ad = result.advertisementData;
+
+    Log.d(
+      'BLE-SCAN-RAW',
+      'parsedId=$parsedId '
+      'advName="${ad.advName}" '
+      'platformName="${result.device.platformName}" '
+      'serviceUuids=${ad.serviceUuids.map((e) => e.toString()).toList()} '
+      'manufacturerKeys=${ad.manufacturerData.keys.toList()} '
+      'serviceDataKeys=${ad.serviceData.keys.map((e) => e.toString()).toList()} '
+      'rssi=${result.rssi}',
+    );
+  }
+
   Future<void> stop() async {
     _scanTimer?.cancel();
     _scanTimer = null;
+
     await _scanResultsSub?.cancel();
     _scanResultsSub = null;
+
     _seenThisCycle.clear();
 
     try {

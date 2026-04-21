@@ -58,7 +58,15 @@ class _ProfileContentState extends State<_ProfileContent> {
       if (uid == null) return;
       final url = await StorageService.instance.uploadAvatar(uid, file);
       if (url != null) {
+        // 1. Aggiorna profilo principale in users/
         await AuthService.instance.updateAvatar(uid, url);
+
+        // 2. Aggiorna anche il bleMapping nell'evento corrente
+        // così gli altri partecipanti vedono subito la nuova foto
+        await EventSessionService.instance.updateMyProfileInEvent({
+          'avatarURL': url,
+        });
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Foto aggiornata!')),
@@ -236,7 +244,9 @@ class _ProfileContentState extends State<_ProfileContent> {
               label: const Text('Esci dall\'evento'),
               onPressed: () async {
                 await EventSessionService.instance.leaveEvent();
-                if (context.mounted) Navigator.pop(context);
+                if (context.mounted) {
+                  Navigator.of(context).popUntil((route) => route.isFirst);
+                }
               },
               style: OutlinedButton.styleFrom(
                 foregroundColor: theme.colorScheme.error,

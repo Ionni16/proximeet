@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../../services/auth_service.dart';
+
 import '../../models/user_model.dart';
+import '../../services/auth_service.dart';
+import '../../services/event_session_service.dart';
 
 class EditProfileScreen extends StatefulWidget {
   final UserModel user;
-  const EditProfileScreen({super.key, required this.user});
+
+  const EditProfileScreen({
+    super.key,
+    required this.user,
+  });
 
   @override
   State<EditProfileScreen> createState() => _EditProfileScreenState();
@@ -14,6 +20,7 @@ class EditProfileScreen extends StatefulWidget {
 class _EditProfileScreenState extends State<EditProfileScreen> {
   final _formKey = GlobalKey<FormState>();
   final _authService = AuthService.instance;
+
   bool _loading = false;
 
   late final TextEditingController _firstNameController;
@@ -30,6 +37,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   void initState() {
     super.initState();
     final u = widget.user;
+
     _firstNameController = TextEditingController(text: u.firstName);
     _lastNameController = TextEditingController(text: u.lastName);
     _companyController = TextEditingController(text: u.company);
@@ -55,40 +63,92 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     super.dispose();
   }
 
+  String _normalizePhone(String value) {
+    return value.trim().replaceAll(' ', '');
+  }
+
+  String _normalizeTwitter(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return '';
+    return trimmed.startsWith('@') ? trimmed : '@$trimmed';
+  }
+
   Future<void> _save() async {
+    if (_loading) return;
     if (!_formKey.currentState!.validate()) return;
+
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Utente non autenticato')),
+      );
+      return;
+    }
+
+    final firstName = _firstNameController.text.trim();
+    final lastName = _lastNameController.text.trim();
+    final company = _companyController.text.trim();
+    final role = _roleController.text.trim();
+    final phone = _normalizePhone(_phoneController.text);
+    final linkedin = _linkedinController.text.trim();
+    final github = _githubController.text.trim();
+    final twitter = _normalizeTwitter(_twitterController.text);
+    final bio = _bioController.text.trim();
+
     setState(() => _loading = true);
 
     try {
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid == null) return;
+      final updates = {
+        'firstName': firstName,
+        'lastName': lastName,
+        'company': company,
+        'role': role,
+        'phone': phone,
+        'linkedin': linkedin,
+        'github': github,
+        'twitter': twitter,
+        'bio': bio,
+      };
 
-      await _authService.updateProfile(uid, {
-        'firstName': _firstNameController.text.trim(),
-        'lastName': _lastNameController.text.trim(),
-        'company': _companyController.text.trim(),
-        'role': _roleController.text.trim(),
-        'phone': _phoneController.text.trim(),
-        'linkedin': _linkedinController.text.trim(),
-        'github': _githubController.text.trim(),
-        'twitter': _twitterController.text.trim(),
-        'bio': _bioController.text.trim(),
+      // 1) Aggiorna profilo utente completo
+      await _authService.updateProfile(uid, updates);
+
+      // 2) Aggiorna solo il profilo pubblico nell'evento corrente
+      await EventSessionService.instance.updateMyProfileInEvent({
+        'displayName': [firstName, lastName]
+            .where((p) => p.isNotEmpty)
+            .join(' '),
+        'company': company,
+        'role': role,
+        'bio': bio,
       });
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Profilo aggiornato!')),
-        );
-        Navigator.pop(context);
-      }
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Profilo aggiornato')),
+      );
+      Navigator.pop(context);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Errore: $e')),
-        );
+      if (!mounted) return;
+
+      final error = e.toString().toLowerCase();
+      String message = 'Errore durante il salvataggio';
+
+      if (error.contains('network-request-failed')) {
+        message = 'Errore di rete. Controlla la connessione';
+      } else if (error.contains('permission-denied')) {
+        message = 'Non hai i permessi per aggiornare il profilo';
       }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -107,6 +167,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         controller: controller,
         keyboardType: keyboard,
         maxLines: maxLines,
+        validator: validator,
+        autovalidateMode: AutovalidateMode.onUserInteraction,
+        textInputAction:
+            maxLines > 1 ? TextInputAction.newline : TextInputAction.next,
         decoration: InputDecoration(
           labelText: label,
           hintText: hint,
@@ -115,7 +179,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             borderRadius: BorderRadius.all(Radius.circular(12)),
           ),
         ),
-        validator: validator,
       ),
     );
   }
@@ -135,8 +198,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Text('Salva',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
+                : const Text(
+                    'Salva',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
           ),
         ],
       ),
@@ -147,7 +212,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _SectionLabel('Dati personali'),
+              const _SectionLabel('Dati personali'),
               Row(
                 children: [
                   Expanded(
@@ -155,7 +220,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       controller: _firstNameController,
                       label: 'Nome',
                       icon: Icons.person_outlined,
-                      validator: (v) => v!.isEmpty ? 'Obbligatorio' : null,
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? 'Obbligatorio' : null,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -164,7 +230,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                       controller: _lastNameController,
                       label: 'Cognome',
                       icon: Icons.person_outlined,
-                      validator: (v) => v!.isEmpty ? 'Obbligatorio' : null,
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? 'Obbligatorio' : null,
                     ),
                   ),
                 ],
@@ -173,42 +240,84 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                 controller: _companyController,
                 label: 'Azienda',
                 icon: Icons.business_outlined,
-                validator: (v) => v!.isEmpty ? 'Obbligatorio' : null,
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? 'Obbligatorio' : null,
               ),
               _field(
                 controller: _roleController,
                 label: 'Ruolo',
                 icon: Icons.work_outlined,
                 hint: 'es. Software Engineer',
-                validator: (v) => v!.isEmpty ? 'Obbligatorio' : null,
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? 'Obbligatorio' : null,
               ),
-              _SectionLabel('Contatti'),
+              const _SectionLabel('Contatti'),
               _field(
                 controller: _phoneController,
                 label: 'Telefono',
                 icon: Icons.phone_outlined,
                 keyboard: TextInputType.phone,
+                validator: (v) {
+                  final value = v?.trim() ?? '';
+                  if (value.isEmpty) return null;
+
+                  final normalized = value.replaceAll(' ', '');
+                  final phoneRegex = RegExp(r'^\+?[0-9]{6,15}$');
+
+                  if (!phoneRegex.hasMatch(normalized)) {
+                    return 'Numero non valido';
+                  }
+                  return null;
+                },
               ),
-              _SectionLabel('Social'),
+              const _SectionLabel('Social'),
               _field(
                 controller: _linkedinController,
                 label: 'LinkedIn',
                 icon: Icons.link_outlined,
                 hint: 'linkedin.com/in/tuoprofilo',
+                validator: (v) {
+                  final value = v?.trim() ?? '';
+                  if (value.isEmpty) return null;
+
+                  if (!value.toLowerCase().contains('linkedin.com/')) {
+                    return 'Link LinkedIn non valido';
+                  }
+                  return null;
+                },
               ),
               _field(
                 controller: _githubController,
                 label: 'GitHub',
                 icon: Icons.code_outlined,
                 hint: 'github.com/tuoprofilo',
+                validator: (v) {
+                  final value = v?.trim() ?? '';
+                  if (value.isEmpty) return null;
+
+                  if (!value.toLowerCase().contains('github.com/')) {
+                    return 'Link GitHub non valido';
+                  }
+                  return null;
+                },
               ),
               _field(
                 controller: _twitterController,
                 label: 'Twitter / X',
                 icon: Icons.alternate_email,
                 hint: '@tuoprofilo',
+                validator: (v) {
+                  final value = v?.trim() ?? '';
+                  if (value.isEmpty) return null;
+
+                  final handleRegex = RegExp(r'^@?[A-Za-z0-9_]{1,15}$');
+                  if (!handleRegex.hasMatch(value)) {
+                    return 'Handle non valido';
+                  }
+                  return null;
+                },
               ),
-              _SectionLabel('Bio'),
+              const _SectionLabel('Bio'),
               _field(
                 controller: _bioController,
                 label: 'Bio',
@@ -224,12 +333,22 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   onPressed: _loading ? null : _save,
                   style: FilledButton.styleFrom(
                     shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   child: _loading
-                      ? const CircularProgressIndicator(color: Colors.white)
-                      : const Text('Salva modifiche',
-                          style: TextStyle(fontSize: 16)),
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text(
+                          'Salva modifiche',
+                          style: TextStyle(fontSize: 16),
+                        ),
                 ),
               ),
               const SizedBox(height: 32),
@@ -243,6 +362,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
 class _SectionLabel extends StatelessWidget {
   final String text;
+
   const _SectionLabel(this.text);
 
   @override

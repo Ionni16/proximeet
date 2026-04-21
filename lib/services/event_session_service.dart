@@ -13,50 +13,69 @@ import 'nearby_detection_service.dart';
 /// Lifecycle completo di un utente dentro un evento:
 /// join → BLE + presence + detection → leave/cleanup.
 ///
-/// È il SINGOLO punto di ingresso per entrare/uscire da un evento.
+/// È il singolo punto di ingresso per entrare/uscire da un evento.
 ///
 /// Singleton: usa [EventSessionService.instance].
 class EventSessionService {
   EventSessionService._();
   static final EventSessionService instance = EventSessionService._();
 
-  final _db = FirebaseFirestore.instance;
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   String? _currentEventId;
   String? _sessionBleId;
   bool _isInEvent = false;
 
+  bool _isJoining = false;
+  bool _isLeaving = false;
+
   String? get currentEventId => _currentEventId;
   String? get sessionBleId => _sessionBleId;
   bool get isInEvent => _isInEvent;
+  bool get isTransitioning => _isJoining || _isLeaving;
+  bool get isJoining => _isJoining;
+  bool get isLeaving => _isLeaving;
 
   Future<bool> joinEvent({
     required String eventId,
     required UserModel user,
   }) async {
-    if (_isInEvent) await leaveEvent();
+    if (_isJoining || _isLeaving) {
+      Log.w('SESSION', 'Join ignorato: transizione già in corso');
+      return false;
+    }
 
-    final uid = user.uid;
-    _sessionBleId =
-        const Uuid().v4().replaceAll('-', '').substring(0, AppConstants.sessionBleIdLength);
-    _currentEventId = eventId;
-
-    Log.d('SESSION', 'Join evento $eventId con BLE ID $_sessionBleId');
+    _isJoining = true;
 
     try {
-      // bleMapping: sessionBleId → profilo (con dati estesi)
+      if (_isInEvent) {
+        await _performLeaveCleanup(markPresenceInactive: true);
+      }
+
+      final uid = user.uid;
+      final newSessionBleId = const Uuid()
+          .v4()
+          .replaceAll('-', '')
+          .substring(0, AppConstants.sessionBleIdLength);
+
+      Log.d('SESSION', 'Join evento $eventId con BLE ID $newSessionBleId');
+
+      _currentEventId = eventId;
+      _sessionBleId = newSessionBleId;
+
+      // 1) Mapping nearby minimale
       await _db
           .collection('events')
           .doc(eventId)
           .collection('bleMapping')
-          .doc(_sessionBleId!)
+          .doc(newSessionBleId)
           .set({
         ...user.toSummary(),
-        'sessionBleId': _sessionBleId,
+        'sessionBleId': newSessionBleId,
         'joinedAt': FieldValue.serverTimestamp(),
       });
 
-      // Presence
+      // 2) Presence iniziale
       await _db
           .collection('events')
           .doc(eventId)
@@ -64,32 +83,37 @@ class EventSessionService {
           .doc(uid)
           .set({
         'uid': uid,
-        'sessionBleId': _sessionBleId,
+        'sessionBleId': newSessionBleId,
         'displayName': user.fullName,
         'avatarURL': user.avatarURL,
         'joinedAt': FieldValue.serverTimestamp(),
         'lastSeen': FieldValue.serverTimestamp(),
         'isActive': true,
-      });
+      }, SetOptions(merge: true));
 
-      // Heartbeat
-      PresenceHeartbeatService.instance.start(eventId: eventId, uid: uid);
-
-      // BLE advertising
-      final advOk = await BleAdvertiserService.instance.start(_sessionBleId!);
+      // 3) Advertising
+      final advOk = await BleAdvertiserService.instance.start(newSessionBleId);
       if (!advOk) {
-        Log.w('SESSION', 'Advertising non avviato (device non supportato?)');
+        throw Exception('Advertising BLE non disponibile');
       }
 
-      // BLE scanning
-      await BleScannerService.instance.start(mySessionBleId: _sessionBleId!);
+      // 4) Scanning
+      await BleScannerService.instance.start(
+        mySessionBleId: newSessionBleId,
+      );
 
-      // Nearby detection
+      // 5) Detection
       await NearbyDetectionService.instance.start(
         eventId: eventId,
         myUid: uid,
-        mySessionBleId: _sessionBleId!,
+        mySessionBleId: newSessionBleId,
         scanner: BleScannerService.instance,
+      );
+
+      // 6) Heartbeat solo alla fine
+      PresenceHeartbeatService.instance.start(
+        eventId: eventId,
+        uid: uid,
       );
 
       _isInEvent = true;
@@ -97,52 +121,123 @@ class EventSessionService {
       return true;
     } catch (e) {
       Log.e('SESSION', 'Errore join', e);
-      await leaveEvent();
+      await _performLeaveCleanup(markPresenceInactive: true);
       return false;
+    } finally {
+      _isJoining = false;
     }
   }
 
   Future<void> leaveEvent() async {
+    if (_isLeaving) {
+      Log.w('SESSION', 'Leave ignorato: uscita già in corso');
+      return;
+    }
+
+    _isLeaving = true;
+
+    try {
+      await _performLeaveCleanup(markPresenceInactive: true);
+    } finally {
+      _isLeaving = false;
+    }
+  }
+
+  Future<void> _performLeaveCleanup({
+    required bool markPresenceInactive,
+  }) async {
     final eventId = _currentEventId;
+    final sessionBleId = _sessionBleId;
     final uid = FirebaseAuth.instance.currentUser?.uid;
 
-    Log.d('SESSION', 'Leave evento $eventId');
+    Log.d('SESSION', 'Cleanup evento=$eventId sessionBleId=$sessionBleId');
 
-    PresenceHeartbeatService.instance.stop();
-    await BleAdvertiserService.instance.stop();
-    await BleScannerService.instance.stop();
-    NearbyDetectionService.instance.clear();
+    try {
+      PresenceHeartbeatService.instance.stop();
 
-    if (eventId != null && uid != null) {
       try {
-        await _db
-            .collection('events')
-            .doc(eventId)
-            .collection('presence')
-            .doc(uid)
-            .update({
-          'isActive': false,
-          'leftAt': FieldValue.serverTimestamp(),
-        });
+        await BleAdvertiserService.instance.stop();
       } catch (e) {
-        Log.e('SESSION', 'Errore update presence on leave', e);
+        Log.e('SESSION', 'Errore stop advertiser', e);
       }
 
-      if (_sessionBleId != null) {
+      try {
+        await BleScannerService.instance.stop();
+      } catch (e) {
+        Log.e('SESSION', 'Errore stop scanner', e);
+      }
+
+      try {
+        NearbyDetectionService.instance.clear();
+      } catch (e) {
+        Log.e('SESSION', 'Errore clear nearby detection', e);
+      }
+
+      if (markPresenceInactive && eventId != null && uid != null) {
+        try {
+          await _db
+              .collection('events')
+              .doc(eventId)
+              .collection('presence')
+              .doc(uid)
+              .set({
+            'isActive': false,
+            'leftAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+        } catch (e) {
+          Log.e('SESSION', 'Errore update presence on leave', e);
+        }
+      }
+
+      if (eventId != null && sessionBleId != null) {
         try {
           await _db
               .collection('events')
               .doc(eventId)
               .collection('bleMapping')
-              .doc(_sessionBleId!)
+              .doc(sessionBleId)
               .delete();
-        } catch (_) {}
+        } catch (e) {
+          Log.e('SESSION', 'Errore delete bleMapping on leave', e);
+        }
       }
+    } finally {
+      _currentEventId = null;
+      _sessionBleId = null;
+      _isInEvent = false;
+      Log.d('SESSION', 'Cleanup completato');
     }
+  }
 
-    _currentEventId = null;
-    _sessionBleId = null;
-    _isInEvent = false;
-    Log.d('SESSION', 'Leave completato');
+  /// Aggiorna i dati del mio profilo nell'evento corrente.
+  /// Da chiamare quando cambi avatar/bio/etc mentre sei dentro un evento,
+  /// così gli altri partecipanti vedono subito le modifiche.
+  Future<void> updateMyProfileInEvent(Map<String, dynamic> updates) async {
+    final eventId = _currentEventId;
+    final sessionBleId = _sessionBleId;
+
+    if (eventId == null || sessionBleId == null) return;
+    if (updates.isEmpty) return;
+
+    // Profilo nearby pubblico: non propagare contatti privati.
+    final safeUpdates = Map<String, dynamic>.from(updates)
+      ..remove('email')
+      ..remove('phone')
+      ..remove('linkedin');
+
+    if (safeUpdates.isEmpty) return;
+
+    try {
+      await _db
+          .collection('events')
+          .doc(eventId)
+          .collection('bleMapping')
+          .doc(sessionBleId)
+          .update(safeUpdates);
+
+      Log.d('SESSION', 'Profilo aggiornato in evento: $safeUpdates');
+    } catch (e) {
+      Log.e('SESSION', 'Errore update profilo evento', e);
+    }
   }
 }

@@ -25,6 +25,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
   @override
   void dispose() {
+    // Pulisci snackbar quando lasci la schermata
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     _scannerCtrl.dispose();
     super.dispose();
   }
@@ -37,18 +39,21 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
     final raw = barcode.rawValue!;
 
-    // Deve essere un URI ProxiMeet: proximeet://user/{uid}?event={eventId}
+    // Blocca subito ulteriori scan finché non terminiamo o resetiamo
+    setState(() => _processing = true);
+
+    // Verifica formato
     if (!raw.startsWith('proximeet://user/')) {
       _showError('QR non valido — non è un codice ProxiMeet');
       return;
     }
 
-    setState(() => _processing = true);
-
     try {
       final uri = Uri.parse(raw);
-      final targetUid = uri.pathSegments.length >= 2
-          ? uri.pathSegments[1]
+      // proximeet://user/{uid}?event={eventId}
+      // → host = "user", pathSegments = ["{uid}"]
+      final targetUid = uri.pathSegments.isNotEmpty
+          ? uri.pathSegments[0]
           : '';
 
       if (targetUid.isEmpty) {
@@ -60,34 +65,39 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       await FirestoreService.instance.sendConnectionRequest(targetUid);
 
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: const Text('Richiesta inviata tramite QR!'),
             backgroundColor: Theme.of(context).colorScheme.primary,
+            duration: const Duration(seconds: 2),
           ),
         );
       }
     } catch (e) {
       _showError(e.toString().replaceAll('Exception: ', ''));
-    } finally {
-      if (mounted) setState(() => _processing = false);
     }
   }
 
   void _showError(String message) {
     if (!mounted) return;
+    // Rimuovi snackbar precedente per evitare accumulo
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
         backgroundColor: Theme.of(context).colorScheme.error,
+        duration: const Duration(seconds: 2),
       ),
     );
-    // Reset dopo un po' per permettere un nuovo scan
-    Future.delayed(const Duration(seconds: 2), () {
+    // Aspetta un attimo prima di permettere un nuovo scan
+    Future.delayed(const Duration(milliseconds: 2500), () {
       if (mounted) setState(() => _processing = false);
     });
   }
+
+
 
   @override
   Widget build(BuildContext context) {

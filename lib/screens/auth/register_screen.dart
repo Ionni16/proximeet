@@ -44,8 +44,39 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
+  void _nextStep() {
+    if (_currentStep == 0) {
+      final ok = _firstNameCtrl.text.trim().isNotEmpty &&
+          _lastNameCtrl.text.trim().isNotEmpty &&
+          _companyCtrl.text.trim().isNotEmpty &&
+          _roleCtrl.text.trim().isNotEmpty;
+
+      if (!ok) {
+        setState(() {
+          _errorMessage = 'Compila i campi obbligatori del profilo';
+        });
+        return;
+      }
+    }
+
+    setState(() {
+      _errorMessage = null;
+      _currentStep++;
+    });
+  }
+
   Future<void> _register() async {
     if (!_formKey.currentState!.validate()) return;
+
+    final email = _emailCtrl.text.trim().toLowerCase();
+    final firstName = _firstNameCtrl.text.trim();
+    final lastName = _lastNameCtrl.text.trim();
+    final company = _companyCtrl.text.trim();
+    final role = _roleCtrl.text.trim();
+    final phone = _phoneCtrl.text.trim().replaceAll(' ', '');
+    final linkedin = _linkedinCtrl.text.trim();
+    final bio = _bioCtrl.text.trim();
+    final password = _passwordCtrl.text;
 
     setState(() {
       _loading = true;
@@ -54,20 +85,17 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
     try {
       await AuthService.instance.register(
-        email: _emailCtrl.text.trim(),
-        password: _passwordCtrl.text.trim(),
-        firstName: _firstNameCtrl.text.trim(),
-        lastName: _lastNameCtrl.text.trim(),
-        company: _companyCtrl.text.trim(),
-        role: _roleCtrl.text.trim(),
-        phone: _phoneCtrl.text.trim(),
-        linkedin: _linkedinCtrl.text.trim(),
-        bio: _bioCtrl.text.trim(),
+        email: email,
+        password: password,
+        firstName: firstName,
+        lastName: lastName,
+        company: company,
+        role: role,
+        phone: phone,
+        linkedin: linkedin,
+        bio: bio,
       );
 
-      // Registrazione riuscita → vai DIRETTAMENTE alla EventListScreen
-      // e rimuovi tutto lo stack di navigazione (Login + Register).
-      // Più affidabile del popUntil che dipende dal timing di authStateChanges.
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (_) => const EventListScreen()),
@@ -75,13 +103,25 @@ class _RegisterScreenState extends State<RegisterScreen> {
         );
       }
     } catch (e) {
+      final error = e.toString().toLowerCase();
+
       setState(() {
-        _errorMessage = e.toString().contains('email-already-in-use')
-            ? 'Email già registrata'
-            : 'Errore durante la registrazione';
+        if (error.contains('email-already-in-use')) {
+          _errorMessage = 'Email già registrata';
+        } else if (error.contains('weak-password')) {
+          _errorMessage = 'Password troppo debole';
+        } else if (error.contains('invalid-email')) {
+          _errorMessage = 'Email non valida';
+        } else if (error.contains('network-request-failed')) {
+          _errorMessage = 'Errore di rete. Controlla la connessione';
+        } else {
+          _errorMessage = 'Errore durante la registrazione';
+        }
       });
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+      }
     }
   }
 
@@ -101,6 +141,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
       keyboardType: keyboardType,
       obscureText: obscure,
       maxLines: maxLines,
+      autovalidateMode: AutovalidateMode.onUserInteraction,
+      textInputAction:
+          maxLines > 1 ? TextInputAction.newline : TextInputAction.next,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
@@ -110,9 +153,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
         ),
         suffixIcon: onToggleObscure != null
             ? IconButton(
-                icon: Icon(obscure
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined),
+                icon: Icon(
+                  obscure
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                ),
                 onPressed: onToggleObscure,
               )
             : null,
@@ -136,7 +181,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       label: 'Nome',
                       icon: Icons.person_outlined,
                       validator: (v) =>
-                          v!.isEmpty ? 'Campo obbligatorio' : null,
+                          v!.trim().isEmpty ? 'Campo obbligatorio' : null,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -146,7 +191,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       label: 'Cognome',
                       icon: Icons.person_outlined,
                       validator: (v) =>
-                          v!.isEmpty ? 'Campo obbligatorio' : null,
+                          v!.trim().isEmpty ? 'Campo obbligatorio' : null,
                     ),
                   ),
                 ],
@@ -156,7 +201,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 controller: _companyCtrl,
                 label: 'Azienda',
                 icon: Icons.business_outlined,
-                validator: (v) => v!.isEmpty ? 'Campo obbligatorio' : null,
+                validator: (v) =>
+                    v!.trim().isEmpty ? 'Campo obbligatorio' : null,
               ),
               const SizedBox(height: 16),
               _buildTextField(
@@ -164,7 +210,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 label: 'Ruolo',
                 icon: Icons.work_outlined,
                 hint: 'es. Software Engineer',
-                validator: (v) => v!.isEmpty ? 'Campo obbligatorio' : null,
+                validator: (v) =>
+                    v!.trim().isEmpty ? 'Campo obbligatorio' : null,
               ),
               const SizedBox(height: 16),
               _buildTextField(
@@ -172,6 +219,18 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 label: 'Telefono (opzionale)',
                 icon: Icons.phone_outlined,
                 keyboardType: TextInputType.phone,
+                validator: (v) {
+                  final value = v?.trim() ?? '';
+                  if (value.isEmpty) return null;
+
+                  final normalized = value.replaceAll(' ', '');
+                  final phoneRegex = RegExp(r'^\+?[0-9]{6,15}$');
+
+                  if (!phoneRegex.hasMatch(normalized)) {
+                    return 'Numero non valido';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 16),
               _buildTextField(
@@ -179,6 +238,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 label: 'LinkedIn (opzionale)',
                 icon: Icons.link_outlined,
                 hint: 'es. linkedin.com/in/tuoprofilo',
+                validator: (v) {
+                  final value = v?.trim() ?? '';
+                  if (value.isEmpty) return null;
+
+                  final lower = value.toLowerCase();
+                  if (!lower.contains('linkedin.com/')) {
+                    return 'Inserisci un link LinkedIn valido';
+                  }
+                  return null;
+                },
               ),
               const SizedBox(height: 16),
               _buildTextField(
@@ -203,8 +272,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 icon: Icons.email_outlined,
                 keyboardType: TextInputType.emailAddress,
                 validator: (v) {
-                  if (v!.isEmpty) return 'Campo obbligatorio';
-                  if (!v.contains('@')) return 'Email non valida';
+                  if (v == null || v.trim().isEmpty) {
+                    return 'Campo obbligatorio';
+                  }
+                  final email = v.trim();
+                  final emailRegex = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+                  if (!emailRegex.hasMatch(email)) {
+                    return 'Email non valida';
+                  }
                   return null;
                 },
               ),
@@ -217,8 +292,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 onToggleObscure: () =>
                     setState(() => _obscurePassword = !_obscurePassword),
                 validator: (v) {
-                  if (v!.isEmpty) return 'Campo obbligatorio';
-                  if (v.length < 6) return 'Minimo 6 caratteri';
+                  if (v == null || v.isEmpty) return 'Campo obbligatorio';
+                  if (v.length < 8) return 'Minimo 8 caratteri';
+                  if (!RegExp(r'[A-Z]').hasMatch(v)) {
+                    return 'Inserisci almeno una maiuscola';
+                  }
+                  if (!RegExp(r'[0-9]').hasMatch(v)) {
+                    return 'Inserisci almeno un numero';
+                  }
                   return null;
                 },
               ),
@@ -231,6 +312,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 onToggleObscure: () =>
                     setState(() => _obscureConfirm = !_obscureConfirm),
                 validator: (v) {
+                  if (v == null || v.isEmpty) {
+                    return 'Campo obbligatorio';
+                  }
                   if (v != _passwordCtrl.text) {
                     return 'Le password non coincidono';
                   }
@@ -258,7 +342,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
             Expanded(
               child: Stepper(
                 currentStep: _currentStep,
-                onStepTapped: (step) => setState(() => _currentStep = step),
+                onStepTapped: _loading
+                    ? null
+                    : (step) {
+                        setState(() {
+                          _errorMessage = null;
+                          _currentStep = step;
+                        });
+                      },
                 controlsBuilder: (context, details) {
                   return Padding(
                     padding: const EdgeInsets.only(top: 16),
@@ -266,7 +357,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       children: [
                         if (_currentStep < _steps.length - 1)
                           FilledButton(
-                            onPressed: () => setState(() => _currentStep++),
+                            onPressed: _loading ? null : _nextStep,
                             style: FilledButton.styleFrom(
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(10),
@@ -296,7 +387,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         if (_currentStep > 0) ...[
                           const SizedBox(width: 12),
                           TextButton(
-                            onPressed: () => setState(() => _currentStep--),
+                            onPressed: _loading
+                                ? null
+                                : () => setState(() {
+                                      _errorMessage = null;
+                                      _currentStep--;
+                                    }),
                             child: const Text('Indietro'),
                           ),
                         ],
@@ -317,8 +413,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.error_outline,
-                        color: theme.colorScheme.error, size: 18),
+                    Icon(
+                      Icons.error_outline,
+                      color: theme.colorScheme.error,
+                      size: 18,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(

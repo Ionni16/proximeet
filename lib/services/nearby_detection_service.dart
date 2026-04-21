@@ -14,9 +14,6 @@ class _CachedProfile {
   final String role;
   final String avatarURL;
   final String bio;
-  final String email;
-  final String linkedin;
-  final String phone;
 
   _CachedProfile({
     required this.uid,
@@ -25,16 +22,13 @@ class _CachedProfile {
     required this.role,
     required this.avatarURL,
     this.bio = '',
-    this.email = '',
-    this.linkedin = '',
-    this.phone = '',
   });
 }
 
 /// Orchestratore tra BLE scanner e UI.
 ///
 /// 1. Ascolta [BleScannerService.detections]
-/// 2. Risolve sessionBleId → uid + profilo completo
+/// 2. Risolve sessionBleId → uid + profilo pubblico
 /// 3. Filtra duplicati e stale
 /// 4. Scrive detections su Firestore (per gating)
 /// 5. Emette [Stream<List<NearbyUser>>] per la UI
@@ -44,19 +38,26 @@ class NearbyDetectionService {
   NearbyDetectionService._();
   static final NearbyDetectionService instance = NearbyDetectionService._();
 
-  final _db = FirebaseFirestore.instance;
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   final Map<String, _CachedProfile> _resolveCache = {};
   final Map<String, NearbyUser> _nearbyMap = {};
-  final _nearbyController = StreamController<List<NearbyUser>>.broadcast();
+  final Map<String, DateTime> _lastDetectionWriteAt = {};
+  final StreamController<List<NearbyUser>> _nearbyController =
+      StreamController<List<NearbyUser>>.broadcast();
 
   Stream<List<NearbyUser>> get nearbyStream => _nearbyController.stream;
 
-  List<NearbyUser> get currentNearby => _nearbyMap.values.toList()
-    ..sort((a, b) => b.rssi.compareTo(a.rssi));
+  List<NearbyUser> get currentNearby {
+    final list = _nearbyMap.values.toList();
+    list.sort((a, b) => b.rssi.compareTo(a.rssi));
+    return list;
+  }
 
-  StreamSubscription? _scanSub;
+  StreamSubscription<RawBleDetection>? _scanSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _mappingSub;
   Timer? _cleanupTimer;
+
   String? _eventId;
   String? _myUid;
   String? _mySessionBleId;
@@ -69,7 +70,17 @@ class NearbyDetectionService {
     required String mySessionBleId,
     required BleScannerService scanner,
   }) async {
-    if (_scanSub != null) return;
+    if (_scanSub != null) {
+      // Se sta già girando sullo stesso evento, non fare nulla.
+      if (_eventId == eventId &&
+          _myUid == myUid &&
+          _mySessionBleId == mySessionBleId) {
+        return;
+      }
+
+      // Se per qualche motivo era partito su uno stato diverso, pulisci.
+      clear();
+    }
 
     _eventId = eventId;
     _myUid = myUid;
@@ -77,13 +88,30 @@ class NearbyDetectionService {
 
     await _preloadCache(eventId);
 
-    _scanSub = scanner.detections.listen(_onRawDetection);
+    _scanSub = scanner.detections.listen(
+      _onRawDetection,
+      onError: (e) => Log.e('NEARBY', 'Errore stream detections', e),
+    );
+
+    // Listener live sul bleMapping:
+    // se un utente cambia foto/nome/ruolo, aggiorniamo la cache
+    // e anche i nearby già presenti in lista.
+    _mappingSub = _db
+        .collection('events')
+        .doc(eventId)
+        .collection('bleMapping')
+        .snapshots()
+        .listen(
+      _onMappingChange,
+      onError: (e) => Log.e('NEARBY', 'Errore stream bleMapping', e),
+    );
 
     _cleanupTimer = Timer.periodic(
       const Duration(seconds: AppConstants.cleanupIntervalSeconds),
       (_) => _removeStale(),
     );
 
+    _emit();
     Log.d('NEARBY', 'Avviato per evento $eventId');
   }
 
@@ -97,21 +125,64 @@ class NearbyDetectionService {
 
       for (final doc in snap.docs) {
         final data = doc.data();
+
         _resolveCache[doc.id] = _CachedProfile(
-          uid: data['uid'] ?? '',
-          displayName: data['displayName'] ?? '',
-          company: data['company'] ?? '',
-          role: data['role'] ?? '',
-          avatarURL: data['avatarURL'] ?? '',
-          bio: data['bio'] ?? '',
-          email: data['email'] ?? '',
-          linkedin: data['linkedin'] ?? '',
-          phone: data['phone'] ?? '',
+          uid: (data['uid'] ?? '') as String,
+          displayName: (data['displayName'] ?? '') as String,
+          company: (data['company'] ?? '') as String,
+          role: (data['role'] ?? '') as String,
+          avatarURL: (data['avatarURL'] ?? '') as String,
+          bio: (data['bio'] ?? '') as String,
         );
       }
+
       Log.d('NEARBY', 'Cache precaricata: ${_resolveCache.length} utenti');
     } catch (e) {
       Log.e('NEARBY', 'Errore preload cache', e);
+    }
+  }
+
+  /// Aggiorna cache + nearbyMap quando cambia il bleMapping.
+  void _onMappingChange(QuerySnapshot<Map<String, dynamic>> snap) {
+    bool anyChange = false;
+
+    for (final doc in snap.docs) {
+      final data = doc.data();
+
+      final newProfile = _CachedProfile(
+        uid: (data['uid'] ?? '') as String,
+        displayName: (data['displayName'] ?? '') as String,
+        company: (data['company'] ?? '') as String,
+        role: (data['role'] ?? '') as String,
+        avatarURL: (data['avatarURL'] ?? '') as String,
+        bio: (data['bio'] ?? '') as String,
+      );
+
+      _resolveCache[doc.id] = newProfile;
+
+      // Se questo utente è già nei nearby, aggiorna il profilo
+      // ma mantieni gli attributi runtime (rssi, lastSeen).
+      final existing = _nearbyMap[newProfile.uid];
+      if (existing != null) {
+        _nearbyMap[newProfile.uid] = NearbyUser(
+          uid: newProfile.uid,
+          displayName: newProfile.displayName,
+          company: newProfile.company,
+          role: newProfile.role,
+          avatarURL: newProfile.avatarURL,
+          bio: newProfile.bio,
+          email: '',
+          linkedin: '',
+          phone: '',
+          rssi: existing.rssi,
+          lastSeen: existing.lastSeen,
+        );
+        anyChange = true;
+      }
+    }
+
+    if (anyChange) {
+      _emit();
     }
   }
 
@@ -120,6 +191,7 @@ class NearbyDetectionService {
 
     final profile = await _resolve(raw.sessionBleId);
     if (profile == null) return;
+    if (profile.uid.isEmpty) return;
     if (profile.uid == _myUid) return;
 
     _nearbyMap[profile.uid] = NearbyUser(
@@ -129,9 +201,9 @@ class NearbyDetectionService {
       role: profile.role,
       avatarURL: profile.avatarURL,
       bio: profile.bio,
-      email: profile.email,
-      linkedin: profile.linkedin,
-      phone: profile.phone,
+      email: '',
+      linkedin: '',
+      phone: '',
       rssi: raw.rssi,
       lastSeen: raw.timestamp,
     );
@@ -141,32 +213,34 @@ class NearbyDetectionService {
   }
 
   Future<_CachedProfile?> _resolve(String sessionBleId) async {
-    if (_resolveCache.containsKey(sessionBleId)) {
-      return _resolveCache[sessionBleId];
-    }
+    final cached = _resolveCache[sessionBleId];
+    if (cached != null) return cached;
 
-    if (_eventId == null) return null;
+    final eventId = _eventId;
+    if (eventId == null) return null;
+
     try {
       final doc = await _db
           .collection('events')
-          .doc(_eventId!)
+          .doc(eventId)
           .collection('bleMapping')
           .doc(sessionBleId)
           .get();
 
       if (!doc.exists) return null;
-      final data = doc.data()!;
+
+      final data = doc.data();
+      if (data == null) return null;
+
       final profile = _CachedProfile(
-        uid: data['uid'] ?? '',
-        displayName: data['displayName'] ?? '',
-        company: data['company'] ?? '',
-        role: data['role'] ?? '',
-        avatarURL: data['avatarURL'] ?? '',
-        bio: data['bio'] ?? '',
-        email: data['email'] ?? '',
-        linkedin: data['linkedin'] ?? '',
-        phone: data['phone'] ?? '',
+        uid: (data['uid'] ?? '') as String,
+        displayName: (data['displayName'] ?? '') as String,
+        company: (data['company'] ?? '') as String,
+        role: (data['role'] ?? '') as String,
+        avatarURL: (data['avatarURL'] ?? '') as String,
+        bio: (data['bio'] ?? '') as String,
       );
+
       _resolveCache[sessionBleId] = profile;
       return profile;
     } catch (e) {
@@ -176,43 +250,62 @@ class NearbyDetectionService {
   }
 
   void _writeDetection(String detectedUid, int rssi) {
-    if (_eventId == null || _myUid == null) return;
+    final eventId = _eventId;
+    final myUid = _myUid;
+    if (eventId == null || myUid == null) return;
+
+    final now = DateTime.now();
+    final lastWrite = _lastDetectionWriteAt[detectedUid];
+
+    if (lastWrite != null &&
+        now.difference(lastWrite).inSeconds <
+            AppConstants.detectionWriteDebounceSeconds) {
+      return;
+    }
+
+    _lastDetectionWriteAt[detectedUid] = now;
 
     _db
         .collection('events')
-        .doc(_eventId!)
+        .doc(eventId)
         .collection('detections')
-        .doc(_myUid!)
+        .doc(myUid)
         .collection('nearby')
         .doc(detectedUid)
         .set({
       'rssi': rssi,
       'lastSeen': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true)).catchError((e) {
+      Log.e('NEARBY', 'Errore write detection', e);
     });
   }
 
   void _removeStale() {
     final staleUids = _nearbyMap.entries
-        .where((e) => e.value.isStale())
-        .map((e) => e.key)
+        .where((entry) => entry.value.isStale())
+        .map((entry) => entry.key)
         .toList();
 
     if (staleUids.isEmpty) return;
 
     for (final uid in staleUids) {
       _nearbyMap.remove(uid);
+      _lastDetectionWriteAt.remove(uid);
     }
+
     _emit();
     Log.d('NEARBY', 'Rimossi ${staleUids.length} utenti stale');
   }
 
   void _emit() {
-    if (!_nearbyController.isClosed) {
-      _nearbyController.add(currentNearby);
-    }
+    if (_nearbyController.isClosed) return;
+    _nearbyController.add(currentNearby);
   }
 
-  bool isRecentlyDetected(String uid, {int maxSeconds = AppConstants.contactGatingSeconds}) {
+  bool isRecentlyDetected(
+    String uid, {
+    int maxSeconds = AppConstants.contactGatingSeconds,
+  }) {
     final user = _nearbyMap[uid];
     if (user == null) return false;
     return !user.isStale(seconds: maxSeconds);
@@ -221,13 +314,21 @@ class NearbyDetectionService {
   void clear() {
     _scanSub?.cancel();
     _scanSub = null;
+
+    _mappingSub?.cancel();
+    _mappingSub = null;
+
     _cleanupTimer?.cancel();
     _cleanupTimer = null;
+
     _nearbyMap.clear();
     _resolveCache.clear();
+    _lastDetectionWriteAt.clear();
+
     _eventId = null;
     _myUid = null;
     _mySessionBleId = null;
+
     _emit();
     Log.d('NEARBY', 'Servizio fermato e cache pulita');
   }
