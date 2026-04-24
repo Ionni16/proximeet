@@ -5,7 +5,7 @@ import 'dart:developer' as dev;
 /// Usa `dart:developer` log() che:
 /// - appare nel DevTools
 /// - può essere filtrato per tag
-/// - in release mode non ha overhead
+/// - in release mode ha overhead minimo
 ///
 /// Uso: `Log.d('SESSION', 'Join completato');`
 abstract final class Log {
@@ -20,7 +20,18 @@ abstract final class Log {
   }
 
   /// Error – errore catturato.
-  static void e(String tag, String message, [Object? error]) {
-    dev.log('❌ $message', name: tag, level: 1000, error: error);
+  static void e(
+    String tag,
+    String message, [
+    Object? error,
+    StackTrace? stackTrace,
+  ]) {
+    dev.log(
+      '❌ $message',
+      name: tag,
+      level: 1000,
+      error: error,
+      stackTrace: stackTrace,
+    );
   }
 }
