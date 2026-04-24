@@ -1,18 +1,50 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../core/constants.dart';
 import '../core/logger.dart';
 import '../models/nearby_user.dart';
+import 'ble_advertiser_service.dart';
 
-/// BLE Scanner cross-platform (Android + iOS).
+/// BLE Scanner — singleton cross-platform.
 ///
-/// Strategia robusta:
-/// 1. Local name con prefix "PM-"
-/// 2. platformName con prefix "PM-" come fallback
+/// ─── Protocollo di parsing ───────────────────────────────────────────────────
 ///
-/// Non usiamo più manufacturer/service UUID come canale principale,
-/// perché il payload advertising deve restare minimale e simmetrico.
+/// Il parser prova due canali in ordine di priorità, senza dipendere da
+/// platformName (che è cache di sistema, non dati live dal pacchetto BLE).
+///
+/// Priorità 1 — Manufacturer Data  →  rileva Android da qualsiasi platform
+///   flutter_blue_plus espone ad.manufacturerData come Map<int, List<int>>:
+///     chiave  = company ID (int, 16-bit)
+///     valore  = payload bytes (i byte DOPO il company ID)
+///
+///   Android ha advertised:
+///     manufacturerId = AppConstants.bleManufacturerId (0xFFFF)
+///     manufacturerData = 8 byte del sessionBleId
+///
+///   Quindi: ad.manufacturerData[0xFFFF] == List<int> di 8 byte → hex 16 chars.
+///
+/// Priorità 2 — advName con prefisso "PM-"  →  rileva iOS da qualsiasi platform
+///   iOS in foreground include localName "PM-{sessionBleId}" nel main packet.
+///   In background iOS non include il localName: questo caso non è rilevabile
+///   tramite advName, ma è un limite di piattaforma accettato nel design.
+///
+/// ─── Filtro scan ─────────────────────────────────────────────────────────────
+///
+/// iOS: withServices:[bleServiceUuid] OBBLIGATORIO.
+///   Senza filtro Core Bluetooth applica throttling aggressivo sulle scan
+///   callback e NON funziona in background. Con filtro lo scan è hardware-
+///   assisted e affidabile.
+///   Rischio di perdere device: zero, perché tutti i device ProxiMeet
+///   advertisano bleServiceUuid.
+///
+/// Android: nessun filtro per serviceUuid.
+///   Alcuni chipset Android con filtro hardware droppano i primissimi
+///   risultati durante il warmup dello scanner. Meglio ricevere tutto
+///   e filtrare in Dart.
+///
+/// ─────────────────────────────────────────────────────────────────────────────
 class BleScannerService {
   BleScannerService._();
   static final BleScannerService instance = BleScannerService._();
@@ -22,6 +54,8 @@ class BleScannerService {
   Timer? _scanTimer;
   bool _isScanning = false;
   String? _mySessionBleId;
+
+  // Per ciclo di scan: evita duplicati nello stesso finestra temporale.
   final Set<String> _seenThisCycle = {};
 
   Stream<RawBleDetection> get detections => _detectedController.stream;
@@ -39,7 +73,7 @@ class BleScannerService {
 
     _scanResultsSub = FlutterBluePlus.scanResults.listen(
       _processScanResults,
-      onError: (e) => Log.e('BLE-SCAN', 'Errore stream scanResults', e),
+      onError: (e, st) => Log.e('BLE-SCAN', 'Errore stream scanResults', e, st),
     );
 
     await _doScan(scanDurationSeconds);
@@ -51,7 +85,9 @@ class BleScannerService {
 
     Log.d(
       'BLE-SCAN',
-      'Avviato (ogni ${intervalSeconds}s, durata ${scanDurationSeconds}s)',
+      'Avviato — platform=${Platform.operatingSystem} '
+      'ciclo=${intervalSeconds}s scan=${scanDurationSeconds}s '
+      'filtroUUID=${Platform.isIOS}',
     );
   }
 
@@ -61,24 +97,44 @@ class BleScannerService {
 
       if (FlutterBluePlus.isScanningNow) {
         await FlutterBluePlus.stopScan();
+        // Breve pausa per consentire al BLE stack di resettare lo stato.
+        await Future.delayed(const Duration(milliseconds: 100));
       }
 
+      // iOS: filtra per serviceUuid → scan affidabile + background support.
+      // Android: nessun filtro → evita problemi di warmup su chipset variabili.
+      final serviceFilter = Platform.isIOS
+          ? [Guid(AppConstants.bleServiceUuid)]
+          : <Guid>[];
+
       await FlutterBluePlus.startScan(
+        withServices: serviceFilter,
         timeout: Duration(seconds: durationSeconds),
         continuousUpdates: true,
         androidScanMode: AndroidScanMode.lowLatency,
       );
-    } catch (e) {
-      Log.e('BLE-SCAN', 'Errore scan', e);
+    } catch (e, st) {
+      Log.e('BLE-SCAN', 'Errore _doScan', e, st);
     }
   }
 
   void _processScanResults(List<ScanResult> results) {
     for (final result in results) {
+      // Filtra device con RSSI troppo basso (rumore radio).
+      if (result.rssi < -95) continue;
+
       final sessionBleId = _extractSessionBleId(result);
 
       if (sessionBleId == null) {
-        _logRawAdvertisement(result, parsedId: null);
+        // Log solo se c'era qualcosa di parzialmente riconoscibile,
+        // per non inondare il log con device BLE estranei.
+        final ad = result.advertisementData;
+        final hasProxiMeetSignal = ad.serviceUuids.any(
+          (u) => u.toString().toUpperCase().contains('FAAB'),
+        );
+        if (hasProxiMeetSignal) {
+          _logRawAdvertisement(result, parsedId: null, label: 'PARSE_FAIL');
+        }
         continue;
       }
 
@@ -95,46 +151,80 @@ class BleScannerService {
         ),
       );
 
-      _logRawAdvertisement(result, parsedId: sessionBleId);
+      _logRawAdvertisement(result, parsedId: sessionBleId, label: 'OK');
 
       Log.d(
         'BLE-SCAN',
-        'Rilevato: $sessionBleId RSSI=${result.rssi} device=${result.device.platformName}',
+        'Rilevato [$sessionBleId] '
+        'rssi=${result.rssi} '
+        'device=${result.device.remoteId}',
       );
     }
   }
 
+  /// Estrae il sessionBleId dal pacchetto BLE.
+  ///
+  /// Canale 1 — manufacturerData (Android → iOS/Android):
+  ///   ad.manufacturerData è Map<int, List<int>> dove:
+  ///     int key   = company ID (0xFFFF per ProxiMeet)
+  ///     List<int> = payload bytes (NON include il company ID)
+  ///   Il sessionBleId è codificato come 8 byte → li convertiamo in hex 16 chars.
+  ///
+  /// Canale 2 — advName (iOS foreground → Android/iOS):
+  ///   advName deve iniziare con bleNamePrefix e avere la lunghezza attesa.
+  ///   Non usiamo platformName: è cache di sistema e non riflette dati live.
   String? _extractSessionBleId(ScanResult result) {
     final ad = result.advertisementData;
-    const prefix = AppConstants.bleNamePrefix;
     const idLen = AppConstants.sessionBleIdLength;
-    final minNameLen = prefix.length + idLen;
+    final expectedBytes = idLen ~/ 2; // 8 byte
 
+    // ── Canale 1: manufacturer data ──────────────────────────────────────────
+    final mfrPayload = ad.manufacturerData[AppConstants.bleManufacturerId];
+    if (mfrPayload != null && mfrPayload.length >= expectedBytes) {
+      final hexId = BleAdvertiserService.bytesToHex(
+        mfrPayload.take(expectedBytes).toList(),
+      );
+      if (_isValidBleId(hexId)) {
+        Log.d('BLE-SCAN', 'ID estratto da manufacturerData: $hexId');
+        return hexId;
+      }
+      Log.w('BLE-SCAN', 'manufacturerData presente ma ID non valido: $hexId');
+    }
+
+    // ── Canale 2: advName ─────────────────────────────────────────────────────
     final advName = ad.advName.trim();
-    if (advName.startsWith(prefix) && advName.length >= minNameLen) {
-      return advName.substring(prefix.length, prefix.length + idLen);
+    if (advName.startsWith(AppConstants.bleNamePrefix)) {
+      final candidate = advName.substring(AppConstants.bleNamePrefix.length);
+      if (candidate.length >= idLen && _isValidBleId(candidate.substring(0, idLen))) {
+        Log.d('BLE-SCAN', 'ID estratto da advName: ${candidate.substring(0, idLen)}');
+        return candidate.substring(0, idLen);
+      }
     }
 
-    final platformName = result.device.platformName.trim();
-    if (platformName.startsWith(prefix) && platformName.length >= minNameLen) {
-      return platformName.substring(prefix.length, prefix.length + idLen);
-    }
-
+    // Nessun canale valido.
     return null;
   }
 
-  void _logRawAdvertisement(ScanResult result, {required String? parsedId}) {
-    final ad = result.advertisementData;
+  /// Verifica che la stringa sia un hex valido della lunghezza attesa.
+  bool _isValidBleId(String id) {
+    if (id.length != AppConstants.sessionBleIdLength) return false;
+    return RegExp(r'^[0-9a-fA-F]+$').hasMatch(id);
+  }
 
+  void _logRawAdvertisement(
+    ScanResult result, {
+    required String? parsedId,
+    required String label,
+  }) {
+    final ad = result.advertisementData;
     Log.d(
       'BLE-SCAN-RAW',
-      'parsedId=$parsedId '
+      '[$label] parsedId=$parsedId '
+      'rssi=${result.rssi} '
       'advName="${ad.advName}" '
-      'platformName="${result.device.platformName}" '
-      'serviceUuids=${ad.serviceUuids.map((e) => e.toString()).toList()} '
-      'manufacturerKeys=${ad.manufacturerData.keys.toList()} '
-      'serviceDataKeys=${ad.serviceData.keys.map((e) => e.toString()).toList()} '
-      'rssi=${result.rssi}',
+      'serviceUuids=${ad.serviceUuids.map((e) => e.str).toList()} '
+      'mfrKeys=${ad.manufacturerData.keys.toList()} '
+      'mfrLens=${ad.manufacturerData.values.map((v) => v.length).toList()}',
     );
   }
 
