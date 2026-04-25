@@ -7,34 +7,34 @@ import '../core/logger.dart';
 import '../models/nearby_user.dart';
 import 'ble_advertiser_service.dart';
 
-/// BLE Scanner — singleton cross-platform.
+/// BLE Scanner — singleton cross-platform (versione no-hw-filter).
 ///
-/// ─── Strategia di scan per piattaforma ───────────────────────────────────────
+/// ─── Strategia di scan ───────────────────────────────────────────────────────
 ///
-/// iOS  → SCAN CONTINUO (un solo startScan, mai restart in foreground).
-///   Motivo: con `withServices:[uuid]` Core Bluetooth attiva il filtro
-///   hardware del coprocessore BLE. Ogni stopScan/startScan rigenera lo
-///   stato del filtro con warm-up di 500ms–1s. In quella finestra gli
-///   advertisement vengono persi, e la cache di deduplicazione del filtro
-///   nel frattempo blocca le successive consegne. Risultato pratico:
-///   "iPhone non rileva niente". La fix è non spegnere mai lo scan.
-///   `continuousUpdates: true` (= allowDuplicates) consegna ogni adv ricevuto.
+/// Sia iOS che Android: SCAN SENZA filtro `withServices`.
 ///
-/// Android → SCAN PERIODICO (8s ciclo, 5s scan).
-///   Su Android il filtro non è in `withServices` (lo facciamo in Dart),
-///   quindi non c'è warm-up hardware. Il restart periodico serve a
-///   forzare un refresh dell'RSSI e ad aggirare bug di alcuni chipset
-///   che droppano i primissimi risultati.
+/// Motivo: il filtro hardware iOS (`withServices`) ha problemi noti di
+/// matching quando l'advertisement contiene il service UUID in forma
+/// 16-bit shortened (es. 0xFAAB), tipicamente quando il peer è Android
+/// o quando iOS stesso ottimizza il base-UUID Bluetooth SIG. Risultato:
+/// scan iOS hardware-filtrato che non riceve mai callback, anche se
+/// l'advertisement è valido e visibile a scanner Android.
+///
+/// Workaround: niente filtro hardware, parsing in Dart (come Android).
+/// Costo: ~10–15% in più di batteria su iOS in foreground.
+/// Beneficio: cross-platform reliability garantita.
+///
+/// Per il supporto background dovremo reintrodurre `withServices` ma
+/// con un secondo UUID 128-bit puramente custom (non base-UUID
+/// expansion) per evitare il bug.
+///
+/// iOS  → un solo startScan continuo (no Timer.periodic).
+/// Android → restart periodico (kept as-is, workaround chipset).
 ///
 /// ─── Protocollo di parsing (immutato) ────────────────────────────────────────
 ///
-/// Canale 1 — Manufacturer Data (Android peripheral):
-///   ad.manufacturerData[0xFFFF] = 8 byte del sessionBleId.
-///
-/// Canale 2 — advName con prefisso "PM-" (iOS peripheral foreground):
-///   advName == "PM-{sessionBleId}".
-///   In iOS background il localName viene strippato dall'OS — limite
-///   accettato by design (si gestirà con presence Firestore).
+/// Canale 1 — Manufacturer Data: ad.manufacturerData[0xFFFF] = 8 byte ID.
+/// Canale 2 — advName: "PM-{sessionBleId}".
 ///
 /// ─────────────────────────────────────────────────────────────────────────────
 class BleScannerService {
@@ -43,18 +43,18 @@ class BleScannerService {
 
   final _detectedController = StreamController<RawBleDetection>.broadcast();
   StreamSubscription<List<ScanResult>>? _scanResultsSub;
+  StreamSubscription<BluetoothAdapterState>? _adapterStateSub;
   Timer? _scanTimer;
   bool _isScanning = false;
   String? _mySessionBleId;
 
-  /// Tracking per-device (NON per-cycle) dell'ultima emissione.
-  /// Permette di throttlare le emit senza bloccare totalmente i device
-  /// già visti — fondamentale per aggiornare RSSI nel tempo.
   final Map<String, DateTime> _lastEmittedAt = {};
-
-  /// Throttle minimo tra due emit dello stesso bleId.
-  /// Evita di intasare il NearbyDetectionService con detection identiche.
   static const Duration _emitThrottle = Duration(seconds: 3);
+
+  /// Counter per debug — capire se lo scan riceve qualcosa.
+  int _totalScanResultsReceived = 0;
+  int _proxiMeetSignalsReceived = 0;
+  Timer? _statsTimer;
 
   Stream<RawBleDetection> get detections => _detectedController.stream;
   bool get isScanning => _isScanning;
@@ -69,6 +69,32 @@ class BleScannerService {
     _isScanning = true;
     _mySessionBleId = mySessionBleId;
     _lastEmittedAt.clear();
+    _totalScanResultsReceived = 0;
+    _proxiMeetSignalsReceived = 0;
+
+    // Diagnostica: stato adapter + permission.
+    // Su iOS state == unauthorized significa permission negata,
+    // visualmente identico a "off" ma fix totalmente diverso.
+    _adapterStateSub = FlutterBluePlus.adapterState.listen((state) {
+      Log.d('BLE-SCAN', 'adapterState=$state');
+      if (state == BluetoothAdapterState.unauthorized) {
+        Log.e(
+          'BLE-SCAN',
+          'PERMESSO BLUETOOTH NEGATO. '
+          'Vai in Impostazioni → ProxiMeet → Bluetooth e abilita.',
+        );
+      }
+    });
+
+    final initialState = await FlutterBluePlus.adapterState.first;
+    Log.d('BLE-SCAN', 'Stato iniziale adapter: $initialState');
+    if (initialState != BluetoothAdapterState.on) {
+      Log.w(
+        'BLE-SCAN',
+        'Adapter non on (state=$initialState) — scan partirà comunque '
+        'ma probabilmente fallirà.',
+      );
+    }
 
     _scanResultsSub = FlutterBluePlus.scanResults.listen(
       _processScanResults,
@@ -76,10 +102,8 @@ class BleScannerService {
     );
 
     if (Platform.isIOS) {
-      // iOS: scan continuo, niente Timer.periodic.
       await _startContinuousIOS();
     } else {
-      // Android: scan periodico.
       await _doAndroidScan(scanDurationSeconds);
       _scanTimer = Timer.periodic(
         Duration(seconds: intervalSeconds),
@@ -87,48 +111,45 @@ class BleScannerService {
       );
     }
 
+    // Stats periodiche per capire se lo scan è "vivo" o non riceve nulla.
+    _statsTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      Log.d(
+        'BLE-SCAN',
+        'STATS — totalResults=$_totalScanResultsReceived '
+        'proxiMeetSignals=$_proxiMeetSignalsReceived '
+        'isScanningNow=${FlutterBluePlus.isScanningNow}',
+      );
+    });
+
     Log.d(
       'BLE-SCAN',
       'Avviato — platform=${Platform.operatingSystem} '
-      'mode=${Platform.isIOS ? "continuous" : "periodic ${intervalSeconds}s/${scanDurationSeconds}s"}',
+      'mode=${Platform.isIOS ? "continuous-no-filter" : "periodic-no-filter"}',
     );
   }
 
-  /// iOS: un solo startScan che vive finché non chiamiamo stop().
-  ///
-  /// Parametri critici:
-  ///   withServices: [bleServiceUuid]  → OBBLIGATORIO per scan affidabile
-  ///                                     e per supporto background futuro.
-  ///   continuousUpdates: true         → allowDuplicates: true. Riceviamo
-  ///                                     ogni adv anche da device già visti,
-  ///                                     necessario per aggiornare RSSI.
-  ///   oneByOne: true                  → ogni adv consegnato singolarmente
-  ///                                     allo stream. No batching, no staleness.
-  ///   timeout: nessuno                → scan continuo. Power management
-  ///                                     gestito dall'OS.
+  /// iOS: scan continuo SENZA filtro hardware.
   Future<void> _startContinuousIOS() async {
     try {
       if (FlutterBluePlus.isScanningNow) {
         await FlutterBluePlus.stopScan();
-        // 500ms invece di 100ms: lasciamo che Core Bluetooth resetti
-        // davvero il filtro hardware prima del nuovo start.
         await Future.delayed(const Duration(milliseconds: 500));
       }
 
       await FlutterBluePlus.startScan(
-        withServices: [Guid(AppConstants.bleServiceUuid)],
+        // NIENTE withServices: vediamo TUTTO, filtriamo in Dart.
+        withServices: const <Guid>[],
         continuousUpdates: true,
         oneByOne: true,
         // No timeout = continuo.
       );
 
-      Log.d('BLE-SCAN', 'iOS continuous scan avviato');
+      Log.d('BLE-SCAN', 'iOS continuous scan avviato (no hw filter)');
     } catch (e, st) {
       Log.e('BLE-SCAN', 'Errore _startContinuousIOS', e, st);
     }
   }
 
-  /// Android: scan periodico con restart per refresh.
   Future<void> _doAndroidScan(int durationSeconds) async {
     try {
       if (FlutterBluePlus.isScanningNow) {
@@ -137,7 +158,6 @@ class BleScannerService {
       }
 
       await FlutterBluePlus.startScan(
-        // Android: niente filtro UUID (workaround chipset variabili).
         withServices: const <Guid>[],
         timeout: Duration(seconds: durationSeconds),
         continuousUpdates: true,
@@ -151,19 +171,35 @@ class BleScannerService {
 
   void _processScanResults(List<ScanResult> results) {
     for (final result in results) {
-      // Filtra device con RSSI troppo basso (rumore radio).
+      _totalScanResultsReceived++;
+
       if (result.rssi < -95) continue;
+
+      final ad = result.advertisementData;
+
+      // Capisci se è un signal ProxiMeet anche se non riusciamo a parsarlo
+      // — ci serve per stats e per log diagnostico.
+      final hasProxiMeetUuid = ad.serviceUuids.any(
+        (u) => u.toString().toUpperCase().contains('FAAB'),
+      );
+      final hasProxiMeetAdvName = ad.advName.startsWith(
+        AppConstants.bleNamePrefix,
+      );
+      final hasProxiMeetMfr = ad.manufacturerData.containsKey(
+        AppConstants.bleManufacturerId,
+      );
+      final isProxiMeet = hasProxiMeetUuid ||
+          hasProxiMeetAdvName ||
+          hasProxiMeetMfr;
+
+      if (isProxiMeet) {
+        _proxiMeetSignalsReceived++;
+      }
 
       final sessionBleId = _extractSessionBleId(result);
 
       if (sessionBleId == null) {
-        // Log solo se c'era qualcosa di parzialmente riconoscibile,
-        // per non inondare il log con device BLE estranei.
-        final ad = result.advertisementData;
-        final hasProxiMeetSignal = ad.serviceUuids.any(
-          (u) => u.toString().toUpperCase().contains('FAAB'),
-        );
-        if (hasProxiMeetSignal) {
+        if (isProxiMeet) {
           _logRawAdvertisement(result, parsedId: null, label: 'PARSE_FAIL');
         }
         continue;
@@ -171,8 +207,6 @@ class BleScannerService {
 
       if (sessionBleId == _mySessionBleId) continue;
 
-      // Throttle per-device (NON cycle-based).
-      // Permette refresh continui ma limita la frequenza a 1 ogni _emitThrottle.
       final now = DateTime.now();
       final lastEmit = _lastEmittedAt[sessionBleId];
       if (lastEmit != null && now.difference(lastEmit) < _emitThrottle) {
@@ -199,13 +233,11 @@ class BleScannerService {
     }
   }
 
-  /// Estrae il sessionBleId dal pacchetto BLE.
   String? _extractSessionBleId(ScanResult result) {
     final ad = result.advertisementData;
     const idLen = AppConstants.sessionBleIdLength;
-    final expectedBytes = idLen ~/ 2; // 8 byte
+    final expectedBytes = idLen ~/ 2;
 
-    // ── Canale 1: manufacturer data ──────────────────────────────────────────
     final mfrPayload = ad.manufacturerData[AppConstants.bleManufacturerId];
     if (mfrPayload != null && mfrPayload.length >= expectedBytes) {
       final hexId = BleAdvertiserService.bytesToHex(
@@ -217,7 +249,6 @@ class BleScannerService {
       Log.w('BLE-SCAN', 'manufacturerData presente ma ID non valido: $hexId');
     }
 
-    // ── Canale 2: advName ─────────────────────────────────────────────────────
     final advName = ad.advName.trim();
     if (advName.startsWith(AppConstants.bleNamePrefix)) {
       final candidate = advName.substring(AppConstants.bleNamePrefix.length);
@@ -256,8 +287,14 @@ class BleScannerService {
     _scanTimer?.cancel();
     _scanTimer = null;
 
+    _statsTimer?.cancel();
+    _statsTimer = null;
+
     await _scanResultsSub?.cancel();
     _scanResultsSub = null;
+
+    await _adapterStateSub?.cancel();
+    _adapterStateSub = null;
 
     _lastEmittedAt.clear();
 
