@@ -11,7 +11,10 @@
 
 	<!-- Location (richiesto da BLE su alcune versioni iOS) -->
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>ProxiMeet usa la posizione per migliorare la rilevazione delle persone vicine</string>
+	<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi.</string>
+
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi anche quando l’app non è in primo piano.</string>
 
 	<!-- Camera per QR scanner -->
 	<key>NSCameraUsageDescription</key>
@@ -28,6 +31,7 @@
 	<array>
 		<string>bluetooth-central</string>
 		<string>bluetooth-peripheral</string>
+		<string>location</string>
 	</array>
 	
 	<key>CADisableMinimumFrameDurationOnPhone</key>
