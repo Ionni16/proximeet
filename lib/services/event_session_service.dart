@@ -53,12 +53,12 @@ class EventSessionService {
       }
 
       final uid = user.uid;
-      final newSessionBleId = const Uuid()
-          .v4()
-          .replaceAll('-', '')
-          .substring(0, AppConstants.sessionBleIdLength);
+      final raw = const Uuid().v4().replaceAll("-", "");
+      final major = int.parse(raw.substring(0, 4), radix: 16);
+      final minor = int.parse(raw.substring(4, 8), radix: 16);
+      final newSessionBleId = AppConstants.beaconKey(major, minor);
 
-      Log.d('SESSION', 'Join evento $eventId con BLE ID $newSessionBleId');
+      Log.d("SESSION", "Join evento $eventId con beaconKey=$newSessionBleId major=$major minor=$minor");
 
       _currentEventId = eventId;
       _sessionBleId = newSessionBleId;
@@ -72,9 +72,12 @@ class EventSessionService {
           .set({
         ...user.toSummary(),
         'sessionBleId': newSessionBleId,
+        'beaconKey': newSessionBleId,
+        'major': major,
+        'minor': minor,
+        'beaconUuid': AppConstants.proximeetBeaconUuid,
         'joinedAt': FieldValue.serverTimestamp(),
       });
-
       // 2) Presence iniziale
       await _db
           .collection('events')
@@ -84,6 +87,10 @@ class EventSessionService {
           .set({
         'uid': uid,
         'sessionBleId': newSessionBleId,
+        'beaconKey': newSessionBleId,
+        'major': major,
+        'minor': minor,
+        'beaconUuid': AppConstants.proximeetBeaconUuid,
         'displayName': user.fullName,
         'avatarURL': user.avatarURL,
         'joinedAt': FieldValue.serverTimestamp(),
