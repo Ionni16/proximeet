@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
@@ -7,36 +6,42 @@ import '../core/logger.dart';
 
 /// BLE Advertising — singleton cross-platform.
 ///
-/// ─── Protocollo ──────────────────────────────────────────────────────────────
+/// ─── Protocollo (v2) ─────────────────────────────────────────────────────────
 ///
-/// L'obiettivo è trasportare il sessionBleId (16 hex chars = 8 byte) nel
-/// main advertising packet, NON nel scan response. Il scan response è un
-/// pacchetto separato che il central richiede esplicitamente via SCAN_REQUEST:
-/// iOS Core Bluetooth lo richiede raramente (usa la cache), quindi qualsiasi
-/// dato trasmesso solo nel scan response può essere invisibile a iOS.
+/// L'identità ProxiMeet viaggia dentro un Service UUID 128-bit dinamico
+/// costruito a partire dal sessionBleId. Schema:
 ///
-/// ── Android (peripheral) ──────────────────────────────────────────────────
-///   Carrier: Manufacturer Specific Data
-///   Motivo: il campo manufacturerData va SEMPRE nel main advertising packet.
-///   Non includiamo localName per tenere il payload al minimo e non rischiare
-///   che il BLE stack Android lo sposti nello scan response.
+///   XXXXXXXX-XXXX-XXXX-FAAB-50524F58494D
+///   └── 8 byte sessionBleId ──┘└── 8 byte signature ──┘
 ///
-///   Struttura pacchetto (17 byte su 31 disponibili):
-///     FLAGS              3B
-///     Service UUID 16bit 4B   (0xFAAB)
-///     Manufacturer Data 10B   (type 1B + len 1B + companyId 2B + bleId 8B)
+/// Esempio: sessionBleId "669f6d6c543a4c22"
+///       →  UUID "669f6d6c-543a-4c22-faab-50524f58494d"
 ///
-/// ── iOS (peripheral) ──────────────────────────────────────────────────────
-///   Carrier: Local Name  →  "PM-{sessionBleId}"
-///   Motivo: CBPeripheralManager non espone API per manufacturer data custom.
-///   In foreground iOS include localName nel main packet.
-///   In background iOS strip il localName e trasmette solo serviceUuid
-///   (limite OS non aggirabile — accettato nel design).
+/// ─── Perché UUID 128-bit invece di localName/manufacturerData ────────────────
 ///
-///   Struttura pacchetto foreground (28 byte su 31 disponibili):
-///     FLAGS              3B
-///     Service UUID 16bit 4B   (0xFAAB)
-///     Local Name        21B   (type 1B + len 1B + "PM-" 3B + hex 16B)
+/// Il Service UUID 128-bit va SEMPRE nel main advertising packet ed è
+/// visibile a tutti gli scanner BLE su qualunque OS. NON è soggetto a:
+///   - localName stripping (iPad → iPhone, Continuity filtering, background)
+///   - manufacturerData filtering (alcune policy iOS)
+///   - scan response cache miss
+///
+/// Costo: 18 byte nel packet (1 length + 1 type + 16 UUID), che insieme ai
+/// 3 byte di FLAGS portano il payload a 21/31 byte. Restano 10 byte liberi
+/// — non sufficienti né per manufacturerData (12B minimi) né per localName
+/// "PM-..." (21B). Quindi questi due canali sono RIMOSSI dall'advertiser.
+///
+/// Per backward compatibility lo scanner continua a parsarli come fallback
+/// (vedi BleScannerService).
+///
+/// ─── Background iOS ─────────────────────────────────────────────────────────
+///
+/// In background iOS è noto che CBPeripheralManager continua ad advertise
+/// solo lo Service UUID (e non localName/manufacturerData). Il nostro nuovo
+/// protocollo si basa proprio su quello → la rilevazione background
+/// dovrebbe funzionare anche lato iOS, a patto che il peer sia in scan
+/// attivo. Resta il limite duro Apple del background-to-background tra
+/// device iOS che usano l'overflow area, ma quello lo gestiamo con il
+/// PresenceService Firestore.
 ///
 /// ─────────────────────────────────────────────────────────────────────────────
 class BleAdvertiserService {
@@ -68,19 +73,14 @@ class BleAdvertiserService {
         return false;
       }
 
-      if (Platform.isAndroid) {
-        await _startAndroid(sessionBleId);
-      } else {
-        await _startIOS(sessionBleId);
-      }
+      final sessionUuid = AppConstants.buildSessionUuid(sessionBleId);
+      await _startUnified(sessionUuid);
 
       _isAdvertising = true;
       _currentSessionBleId = sessionBleId;
       Log.d(
         'BLE-ADV',
-        'Avviato — platform=${Platform.operatingSystem} '
-        'bleId=$sessionBleId '
-        'carrier=${Platform.isAndroid ? "manufacturerData" : "localName"}',
+        'Avviato — bleId=$sessionBleId uuid=$sessionUuid',
       );
       return true;
     } catch (e, st) {
@@ -91,48 +91,30 @@ class BleAdvertiserService {
     }
   }
 
-  /// Android: manufacturer data come carrier primario e unico dell'ID.
+  /// Advertise unificato per iOS e Android: solo Service UUID 128-bit
+  /// dinamico, niente localName, niente manufacturerData.
   ///
-  /// Non includiamo localName deliberatamente:
-  ///   - risparmia byte nel payload
-  ///   - elimina il rischio che il BLE stack lo sposti nel scan response
-  ///   - la detection iOS avviene esclusivamente via manufacturerData
-  Future<void> _startAndroid(String sessionBleId) async {
+  /// Su Android la libreria flutter_ble_peripheral usa AdvertiseSettings
+  /// per il tuning di mode/power. Su iOS questi parametri sono ignorati
+  /// (CBPeripheralManager non li espone) — innocui passarli comunque.
+  Future<void> _startUnified(String sessionUuid) async {
     final advertiseData = AdvertiseData(
-      serviceUuid: AppConstants.bleServiceUuid,
-      manufacturerId: AppConstants.bleManufacturerId,
-      manufacturerData: _hexToBytes(sessionBleId),
+      serviceUuid: sessionUuid,
       includeDeviceName: false,
+      // Nessun manufacturerData, nessun localName.
     );
 
     final advertiseSettings = AdvertiseSettings(
       advertiseMode: AdvertiseMode.advertiseModeLowLatency,
       txPowerLevel: AdvertiseTxPower.advertiseTxPowerHigh,
       connectable: false,
-      timeout: 0, // advertising continuo
+      timeout: 0, // continuo
     );
 
     await _peripheral.start(
       advertiseData: advertiseData,
       advertiseSettings: advertiseSettings,
     );
-  }
-
-  /// iOS: localName come carrier primario dell'ID.
-  ///
-  /// Limite noto: in background iOS trasmette solo serviceUuid.
-  /// In foreground trasmette serviceUuid + localName nel main packet.
-  /// Non esiste API pubblica per aggirare questo limite su iOS.
-  Future<void> _startIOS(String sessionBleId) async {
-    final localName = '${AppConstants.bleNamePrefix}$sessionBleId';
-
-    final advertiseData = AdvertiseData(
-      serviceUuid: AppConstants.bleServiceUuid,
-      localName: localName,
-      includeDeviceName: false,
-    );
-
-    await _peripheral.start(advertiseData: advertiseData);
   }
 
   Future<void> stop() async {
@@ -149,10 +131,8 @@ class BleAdvertiserService {
     }
   }
 
-  // ── Utilità codec ─────────────────────────────────────────────────────────
+  // ── Utilità codec (mantenute: usate dallo scanner per il fallback legacy) ──
 
-  /// Converte una stringa hex (es. "a1b2c3d4e5f60708") in byte array.
-  /// Usata per codificare il sessionBleId nel campo manufacturer data.
   static Uint8List _hexToBytes(String hex) {
     assert(hex.length.isEven, 'hex deve avere lunghezza pari');
     final bytes = List<int>.generate(
@@ -163,7 +143,7 @@ class BleAdvertiserService {
   }
 
   /// Converte un byte array nel sessionBleId hex string.
-  /// Usata dallo scanner per decodificare il campo manufacturer data.
+  /// Usata dallo scanner per decodificare il fallback legacy manufacturerData.
   static String bytesToHex(List<int> bytes) {
     return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }

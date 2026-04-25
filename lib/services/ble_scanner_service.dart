@@ -7,34 +7,35 @@ import '../core/logger.dart';
 import '../models/nearby_user.dart';
 import 'ble_advertiser_service.dart';
 
-/// BLE Scanner — singleton cross-platform (versione no-hw-filter).
+/// BLE Scanner — singleton cross-platform (v3).
 ///
 /// ─── Strategia di scan ───────────────────────────────────────────────────────
 ///
-/// Sia iOS che Android: SCAN SENZA filtro `withServices`.
+/// iOS  → SCAN CONTINUO senza filtro hardware. Un solo startScan(), dura
+///        finché non chiamiamo stop(). Niente Timer.periodic.
+/// Android → SCAN PERIODICO 5s/8s (workaround per chipset variabili).
 ///
-/// Motivo: il filtro hardware iOS (`withServices`) ha problemi noti di
-/// matching quando l'advertisement contiene il service UUID in forma
-/// 16-bit shortened (es. 0xFAAB), tipicamente quando il peer è Android
-/// o quando iOS stesso ottimizza il base-UUID Bluetooth SIG. Risultato:
-/// scan iOS hardware-filtrato che non riceve mai callback, anche se
-/// l'advertisement è valido e visibile a scanner Android.
+/// Filtraggio in Dart, non hardware: con `withServices` vuoto vediamo
+/// TUTTO il traffico BLE e parsiamo noi. Costa un po' di batteria in più
+/// ma evita due bug noti del filtro hardware iOS:
+///   - matching inaffidabile su UUID 16-bit shortened
+///   - dedup cache che blocca consegne dopo restart
 ///
-/// Workaround: niente filtro hardware, parsing in Dart (come Android).
-/// Costo: ~10–15% in più di batteria su iOS in foreground.
-/// Beneficio: cross-platform reliability garantita.
+/// ─── Protocollo di parsing ───────────────────────────────────────────────────
 ///
-/// Per il supporto background dovremo reintrodurre `withServices` ma
-/// con un secondo UUID 128-bit puramente custom (non base-UUID
-/// expansion) per evitare il bug.
+/// Canale 1 (PRIMARIO) — Service UUID 128-bit dinamico:
+///   Cerca un UUID che termina con la signature ProxiMeet
+///   ("FAAB50524F58494D"). I primi 8 byte dell'UUID sono il sessionBleId.
+///   Visibile a tutti gli scanner BLE su qualunque OS, immune a localName
+///   stripping (iPad → iPhone) e a Continuity filtering.
 ///
-/// iOS  → un solo startScan continuo (no Timer.periodic).
-/// Android → restart periodico (kept as-is, workaround chipset).
+/// Canale 2 (FALLBACK LEGACY) — Manufacturer Data:
+///   ad.manufacturerData[0xFFFF] = 8 byte sessionBleId.
+///   Mantenuto per compatibilità con device che girano una vecchia
+///   versione dell'app durante eventi misti.
 ///
-/// ─── Protocollo di parsing (immutato) ────────────────────────────────────────
-///
-/// Canale 1 — Manufacturer Data: ad.manufacturerData[0xFFFF] = 8 byte ID.
-/// Canale 2 — advName: "PM-{sessionBleId}".
+/// Canale 3 (FALLBACK LEGACY) — localName "PM-{sessionBleId}":
+///   Idem, fallback per vecchie versioni.
 ///
 /// ─────────────────────────────────────────────────────────────────────────────
 class BleScannerService {
@@ -45,16 +46,16 @@ class BleScannerService {
   StreamSubscription<List<ScanResult>>? _scanResultsSub;
   StreamSubscription<BluetoothAdapterState>? _adapterStateSub;
   Timer? _scanTimer;
+  Timer? _statsTimer;
   bool _isScanning = false;
   String? _mySessionBleId;
 
   final Map<String, DateTime> _lastEmittedAt = {};
   static const Duration _emitThrottle = Duration(seconds: 3);
 
-  /// Counter per debug — capire se lo scan riceve qualcosa.
+  // Diagnostica.
   int _totalScanResultsReceived = 0;
   int _proxiMeetSignalsReceived = 0;
-  Timer? _statsTimer;
 
   Stream<RawBleDetection> get detections => _detectedController.stream;
   bool get isScanning => _isScanning;
@@ -72,9 +73,6 @@ class BleScannerService {
     _totalScanResultsReceived = 0;
     _proxiMeetSignalsReceived = 0;
 
-    // Diagnostica: stato adapter + permission.
-    // Su iOS state == unauthorized significa permission negata,
-    // visualmente identico a "off" ma fix totalmente diverso.
     _adapterStateSub = FlutterBluePlus.adapterState.listen((state) {
       Log.d('BLE-SCAN', 'adapterState=$state');
       if (state == BluetoothAdapterState.unauthorized) {
@@ -85,16 +83,6 @@ class BleScannerService {
         );
       }
     });
-
-    final initialState = await FlutterBluePlus.adapterState.first;
-    Log.d('BLE-SCAN', 'Stato iniziale adapter: $initialState');
-    if (initialState != BluetoothAdapterState.on) {
-      Log.w(
-        'BLE-SCAN',
-        'Adapter non on (state=$initialState) — scan partirà comunque '
-        'ma probabilmente fallirà.',
-      );
-    }
 
     _scanResultsSub = FlutterBluePlus.scanResults.listen(
       _processScanResults,
@@ -111,8 +99,7 @@ class BleScannerService {
       );
     }
 
-    // Stats periodiche per capire se lo scan è "vivo" o non riceve nulla.
-    _statsTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _statsTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       Log.d(
         'BLE-SCAN',
         'STATS — totalResults=$_totalScanResultsReceived '
@@ -124,27 +111,22 @@ class BleScannerService {
     Log.d(
       'BLE-SCAN',
       'Avviato — platform=${Platform.operatingSystem} '
-      'mode=${Platform.isIOS ? "continuous-no-filter" : "periodic-no-filter"}',
+      'mode=${Platform.isIOS ? "continuous" : "periodic"}',
     );
   }
 
-  /// iOS: scan continuo SENZA filtro hardware.
   Future<void> _startContinuousIOS() async {
     try {
       if (FlutterBluePlus.isScanningNow) {
         await FlutterBluePlus.stopScan();
         await Future.delayed(const Duration(milliseconds: 500));
       }
-
       await FlutterBluePlus.startScan(
-        // NIENTE withServices: vediamo TUTTO, filtriamo in Dart.
         withServices: const <Guid>[],
         continuousUpdates: true,
         oneByOne: true,
-        // No timeout = continuo.
       );
-
-      Log.d('BLE-SCAN', 'iOS continuous scan avviato (no hw filter)');
+      Log.d('BLE-SCAN', 'iOS continuous scan avviato');
     } catch (e, st) {
       Log.e('BLE-SCAN', 'Errore _startContinuousIOS', e, st);
     }
@@ -156,7 +138,6 @@ class BleScannerService {
         await FlutterBluePlus.stopScan();
         await Future.delayed(const Duration(milliseconds: 100));
       }
-
       await FlutterBluePlus.startScan(
         withServices: const <Guid>[],
         timeout: Duration(seconds: durationSeconds),
@@ -172,38 +153,12 @@ class BleScannerService {
   void _processScanResults(List<ScanResult> results) {
     for (final result in results) {
       _totalScanResultsReceived++;
-
       if (result.rssi < -95) continue;
 
-      final ad = result.advertisementData;
-
-      // Capisci se è un signal ProxiMeet anche se non riusciamo a parsarlo
-      // — ci serve per stats e per log diagnostico.
-      final hasProxiMeetUuid = ad.serviceUuids.any(
-        (u) => u.toString().toUpperCase().contains('FAAB'),
-      );
-      final hasProxiMeetAdvName = ad.advName.startsWith(
-        AppConstants.bleNamePrefix,
-      );
-      final hasProxiMeetMfr = ad.manufacturerData.containsKey(
-        AppConstants.bleManufacturerId,
-      );
-      final isProxiMeet = hasProxiMeetUuid ||
-          hasProxiMeetAdvName ||
-          hasProxiMeetMfr;
-
-      if (isProxiMeet) {
-        _proxiMeetSignalsReceived++;
-      }
-
       final sessionBleId = _extractSessionBleId(result);
+      if (sessionBleId == null) continue;
 
-      if (sessionBleId == null) {
-        if (isProxiMeet) {
-          _logRawAdvertisement(result, parsedId: null, label: 'PARSE_FAIL');
-        }
-        continue;
-      }
+      _proxiMeetSignalsReceived++;
 
       if (sessionBleId == _mySessionBleId) continue;
 
@@ -222,38 +177,56 @@ class BleScannerService {
         ),
       );
 
-      _logRawAdvertisement(result, parsedId: sessionBleId, label: 'OK');
-
       Log.d(
         'BLE-SCAN',
         'Rilevato [$sessionBleId] '
         'rssi=${result.rssi} '
+        'channel=${_lastChannel ?? "?"} '
         'device=${result.device.remoteId}',
       );
     }
   }
 
+  /// Tracks da quale canale è arrivata l'ultima detection (solo per log).
+  String? _lastChannel;
+
+  /// Estrae sessionBleId provando i 3 canali in ordine di priorità.
   String? _extractSessionBleId(ScanResult result) {
     final ad = result.advertisementData;
-    const idLen = AppConstants.sessionBleIdLength;
-    final expectedBytes = idLen ~/ 2;
 
-    final mfrPayload = ad.manufacturerData[AppConstants.bleManufacturerId];
+    // ── Canale 1 (primario v2): Service UUID 128-bit dinamico ────────────────
+    for (final guid in ad.serviceUuids) {
+      final extracted = AppConstants.extractSessionBleIdFromUuid(guid.str);
+      if (extracted != null) {
+        _lastChannel = 'uuid';
+        return extracted;
+      }
+    }
+
+    // ── Canale 2 (legacy): manufacturer data ─────────────────────────────────
+    final mfrPayload =
+        ad.manufacturerData[AppConstants.legacyBleManufacturerId];
+    final expectedBytes = AppConstants.sessionBleIdLength ~/ 2;
     if (mfrPayload != null && mfrPayload.length >= expectedBytes) {
       final hexId = BleAdvertiserService.bytesToHex(
         mfrPayload.take(expectedBytes).toList(),
       );
       if (_isValidBleId(hexId)) {
+        _lastChannel = 'mfr';
         return hexId;
       }
-      Log.w('BLE-SCAN', 'manufacturerData presente ma ID non valido: $hexId');
     }
 
+    // ── Canale 3 (legacy): localName "PM-..." ────────────────────────────────
     final advName = ad.advName.trim();
-    if (advName.startsWith(AppConstants.bleNamePrefix)) {
-      final candidate = advName.substring(AppConstants.bleNamePrefix.length);
+    if (advName.startsWith(AppConstants.legacyBleNamePrefix)) {
+      final candidate = advName.substring(
+        AppConstants.legacyBleNamePrefix.length,
+      );
+      final idLen = AppConstants.sessionBleIdLength;
       if (candidate.length >= idLen &&
           _isValidBleId(candidate.substring(0, idLen))) {
+        _lastChannel = 'name';
         return candidate.substring(0, idLen);
       }
     }
@@ -266,33 +239,14 @@ class BleScannerService {
     return RegExp(r'^[0-9a-fA-F]+$').hasMatch(id);
   }
 
-  void _logRawAdvertisement(
-    ScanResult result, {
-    required String? parsedId,
-    required String label,
-  }) {
-    final ad = result.advertisementData;
-    Log.d(
-      'BLE-SCAN-RAW',
-      '[$label] parsedId=$parsedId '
-      'rssi=${result.rssi} '
-      'advName="${ad.advName}" '
-      'serviceUuids=${ad.serviceUuids.map((e) => e.str).toList()} '
-      'mfrKeys=${ad.manufacturerData.keys.toList()} '
-      'mfrLens=${ad.manufacturerData.values.map((v) => v.length).toList()}',
-    );
-  }
-
   Future<void> stop() async {
     _scanTimer?.cancel();
     _scanTimer = null;
-
     _statsTimer?.cancel();
     _statsTimer = null;
 
     await _scanResultsSub?.cancel();
     _scanResultsSub = null;
-
     await _adapterStateSub?.cancel();
     _adapterStateSub = null;
 
