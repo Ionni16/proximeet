@@ -217,10 +217,23 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     }
   }
 
+  @available(iOS 14.0, *)
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-    guard let rx = rxRegion else { return }
+    handleAuthorizationStatus(manager.authorizationStatus, manager: manager)
+  }
 
-    let status = manager.authorizationStatus
+  func locationManager(
+    _ manager: CLLocationManager,
+    didChangeAuthorization status: CLAuthorizationStatus
+  ) {
+    handleAuthorizationStatus(status, manager: manager)
+  }
+
+  private func handleAuthorizationStatus(
+    _ status: CLAuthorizationStatus,
+    manager: CLLocationManager
+  ) {
+    guard let rx = rxRegion else { return }
 
     eventSink?([
       "type": "locationAuthorization",
