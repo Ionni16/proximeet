@@ -252,22 +252,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     }
   }
 
-  func locationManager(
-    _ manager: CLLocationManager,
-    didChangeAuthorization status: CLAuthorizationStatus
-  ) {
-    guard let rx = rxRegion else { return }
 
-    if status == .authorizedAlways || status == .authorizedWhenInUse {
-      manager.startMonitoring(for: rx)
-
-      if #available(iOS 13.0, *) {
-        manager.startRangingBeacons(satisfying: rx.beaconIdentityConstraint)
-      } else {
-        manager.startRangingBeacons(in: rx)
-      }
-    }
-  }
 
   func locationManager(
     _ manager: CLLocationManager,
