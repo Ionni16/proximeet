@@ -4,7 +4,7 @@ import CoreBluetooth
 import CoreLocation
 
 @main
-@objc class AppDelegate: FlutterAppViewController {
+@objc class AppDelegate: FlutterAppDelegate {
 
   override func application(
     _ application: UIApplication,
