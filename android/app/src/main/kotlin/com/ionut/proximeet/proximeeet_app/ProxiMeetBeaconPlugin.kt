@@ -10,7 +10,6 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -47,6 +46,18 @@ class ProxiMeetBeaconPlugin(
     private var expectedUuid: UUID? = null
     private var myMajor: Int = -1
     private var myMinor: Int = -1
+
+    // ── EWMA RSSI smoothing ──────────────────────────────────────────────────
+    // Chiave: "major_minor", valore: RSSI smoothed (float per precisione).
+    // alpha=0.25 → 25% peso al nuovo valore, 75% all'EWMA precedente.
+    // Stabilizza il segnale senza introdurre troppa latenza alla risposta.
+    private val rssiSmoothed = mutableMapOf<String, Float>()
+    private val EWMA_ALPHA = 0.25f
+
+    // Rate-limit emit: non inviare lo stesso beacon a Flutter più di
+    // una volta ogni MIN_EMIT_INTERVAL_MS (evita flood UI inutile).
+    private val lastEmitAt = mutableMapOf<String, Long>()
+    private val MIN_EMIT_INTERVAL_MS = 800L
 
     init {
         methodChannel.setMethodCallHandler(this)
@@ -202,14 +213,23 @@ class ProxiMeetBeaconPlugin(
             .setReportDelay(0)
             .build()
 
-        val filter = ScanFilter.Builder()
-            .setManufacturerData(
-                APPLE_COMPANY_ID,
-                byteArrayOf(0x02, 0x15),
-                byteArrayOf(0xFF.toByte(), 0xFF.toByte())
-            )
-            .build()
-
+        // ── FIX CRITICO: NESSUN ScanFilter ─────────────────────────────────
+        //
+        // BUG ORIGINALE: usare ScanFilter.setManufacturerData(APPLE_COMPANY_ID, ...)
+        // causa un problema documentato e diffuso su Android: molti OEM
+        // (Xiaomi, Samsung, Huawei, OnePlus, Motorola...) filtrano o bloccano
+        // a livello di driver BLE i pacchetti con manufacturer company ID Apple
+        // (0x004C), probabilmente per evitare che app di terze parti
+        // intercettino traffico AirDrop/AirPods. Il risultato è che lo scan
+        // non restituisce nessun risultato anche quando ci sono beacon vicini,
+        // e il bug si manifesta in modo asimmetrico: un device vede l'altro
+        // ma non viceversa, a seconda del modello del telefono.
+        //
+        // FIX: scan senza filtri HW (emptyList()). Tutti i pacchetti BLE
+        // arrivano al callback e parseIBeacon filtra per UUID → corretto
+        // e sicuro. L'impatto sulla batteria è trascurabile per un'app
+        // di networking in foreground.
+        // ────────────────────────────────────────────────────────────────────
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 parseIBeacon(result, uuid)?.let { eventSink?.success(it) }
@@ -232,7 +252,7 @@ class ProxiMeetBeaconPlugin(
             }
         }
 
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        scanner?.startScan(emptyList(), settings, scanCallback)
     }
 
     private fun parseIBeacon(result: ScanResult, expectedUuid: UUID): Map<String, Any>? {
@@ -253,11 +273,35 @@ class ProxiMeetBeaconPlugin(
         // Evita di rilevare sé stessi.
         if (major == myMajor && minor == myMinor) return null
 
+        // Scarta RSSI non validi (0 = non disponibile, < -100 = rumore puro).
+        val rawRssi = result.rssi
+        if (rawRssi == 0 || rawRssi < -100) return null
+
+        // ── EWMA smoothing ──────────────────────────────────────────────────
+        // Ogni packet BLE ha RSSI variabile (±10-20 dBm è normale).
+        // L'EWMA stabilizza la distanza percepita senza latenza eccessiva.
+        val key = "${major}_${minor}"
+        val prev = rssiSmoothed[key]
+        val smoothed: Float = if (prev == null) {
+            rawRssi.toFloat()
+        } else {
+            EWMA_ALPHA * rawRssi.toFloat() + (1f - EWMA_ALPHA) * prev
+        }
+        rssiSmoothed[key] = smoothed
+        // ────────────────────────────────────────────────────────────────────
+
+        // Rate-limit emit: un beacon attivo può inviare ogni 100-300ms.
+        // Limitare a MAX 1 evento/800ms per evitare flood alla UI Flutter.
+        val now = System.currentTimeMillis()
+        val last = lastEmitAt[key] ?: 0L
+        if (now - last < MIN_EMIT_INTERVAL_MS) return null
+        lastEmitAt[key] = now
+
         return mapOf(
             "type" to "beacon",
             "major" to major,
             "minor" to minor,
-            "rssi" to result.rssi,
+            "rssi" to smoothed.toInt(),
             "platform" to "android"
         )
     }
@@ -305,6 +349,8 @@ class ProxiMeetBeaconPlugin(
         expectedUuid = null
         myMajor = -1
         myMinor = -1
+        rssiSmoothed.clear()
+        lastEmitAt.clear()
     }
 
     companion object {
