@@ -12,11 +12,15 @@ import CoreLocation
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
 
-    guard let controller = window?.rootViewController as? FlutterViewController else {
-      return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    // Il progetto usa UISceneDelegate: in questo caso `window` può essere nil
+    // durante didFinishLaunching e il vecchio codice non registrava mai
+    // MethodChannel/EventChannel. Risultato: MissingPluginException su iOS.
+    // Il registrar del FlutterAppDelegate fornisce un messenger valido senza
+    // dipendere dal rootViewController.
+    if let registrar = self.registrar(forPlugin: "ProxiMeetBeaconPlugin") {
+      ProxiMeetBeaconPlugin.register(with: registrar.messenger())
     }
 
-    ProxiMeetBeaconPlugin.register(with: controller.binaryMessenger)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -295,7 +299,15 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
       "platform": "ios"
     ])
 
-    if status == .authorizedAlways || status == .authorizedWhenInUse {
+    if status == .authorizedWhenInUse {
+      // Upgrade corretto: permission_handler chiede WhenInUse; il plugin nativo
+      // deve poi richiedere Always per mantenere beacon/ranging in background.
+      manager.requestAlwaysAuthorization()
+      startRangingIfPossible(manager: manager)
+      return
+    }
+
+    if status == .authorizedAlways {
       startRangingIfPossible(manager: manager)
     }
   }
