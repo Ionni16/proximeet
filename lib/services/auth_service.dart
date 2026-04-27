@@ -92,8 +92,6 @@ class AuthService {
     } catch (e) {
       final createdUid = credential?.user?.uid;
 
-      // Rollback: se Auth è stato creato ma Firestore fallisce,
-      // proviamo a non lasciare account mezzi creati.
       if (createdUid != null) {
         try {
           await _db.collection('users').doc(createdUid).delete();
@@ -122,12 +120,64 @@ class AuthService {
     return UserModel.fromMap(data);
   }
 
+  /// Aggiorna la foto profilo dell'utente.
+  ///
+  /// BUG FIX: oltre ad aggiornare [users/{uid}], propaga la nuova URL anche
+  /// in tutti i documenti [connections/{contactUid}/contacts/{uid}] dei propri
+  /// contatti. Senza questo passaggio, il wallet degli altri utenti mostrava
+  /// la vecchia foto perché il documento contatto non triggherava un aggiornamento
+  /// dello stream, impedendo all'hydration di rileggere il profilo aggiornato.
   Future<void> updateAvatar(String uid, String avatarURL) async {
-    final normalizedAvatarUrl = avatarURL.trim();
+    final normalizedUrl = avatarURL.trim();
 
+    // 1. Aggiorna il profilo principale.
     await _db.collection('users').doc(uid).set({
-      'avatarURL': normalizedAvatarUrl,
+      'avatarURL': normalizedUrl,
     }, SetOptions(merge: true));
+
+    // 2. Propaga la nuova foto in tutti i wallet dove appaio come contatto.
+    //    Leggo i miei contatti → per ognuno aggiorno la mia entry nel loro wallet.
+    //    Questo triggera i loro stream Firestore → rebuilda il loro wallet.
+    try {
+      final myContactsSnap = await _db
+          .collection('connections')
+          .doc(uid)
+          .collection('contacts')
+          .get();
+
+      if (myContactsSnap.docs.isEmpty) return;
+
+      final batch = _db.batch();
+      for (final contactDoc in myContactsSnap.docs) {
+        final contactUid = contactDoc.data()['uid'] as String? ?? contactDoc.id;
+        if (contactUid.isEmpty) continue;
+
+        final myEntryRef = _db
+            .collection('connections')
+            .doc(contactUid)
+            .collection('contacts')
+            .doc(uid);
+
+        batch.set(
+          myEntryRef,
+          {
+            'avatarURL': normalizedUrl,
+            'avatarUrl': normalizedUrl,
+            'photoURL': normalizedUrl,
+          },
+          SetOptions(merge: true),
+        );
+      }
+
+      await batch.commit();
+      Log.d(
+        'AUTH',
+        'Avatar propagato a ${myContactsSnap.docs.length} contatti',
+      );
+    } catch (e) {
+      // Non bloccante: il profilo principale è già aggiornato.
+      Log.e('AUTH', 'Errore propagazione avatar ai contatti', e);
+    }
   }
 
   Future<void> updateProfile(String uid, Map<String, dynamic> data) async {

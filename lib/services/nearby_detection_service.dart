@@ -29,9 +29,10 @@ class _CachedProfile {
 ///
 /// 1. Ascolta [BleScannerService.detections]
 /// 2. Risolve sessionBleId → uid + profilo pubblico
-/// 3. Filtra duplicati e stale
-/// 4. Scrive detections su Firestore (per gating)
-/// 5. Emette [Stream<List<NearbyUser>>] per la UI
+/// 3. Smoothing RSSI con EWMA (α=0.25) per stabilizzare il segnale
+/// 4. Filtra duplicati e stale
+/// 5. Scrive detections su Firestore (per gating)
+/// 6. Emette [Stream<List<NearbyUser>>] per la UI
 ///
 /// Singleton: usa [NearbyDetectionService.instance].
 class NearbyDetectionService {
@@ -43,6 +44,21 @@ class NearbyDetectionService {
   final Map<String, _CachedProfile> _resolveCache = {};
   final Map<String, NearbyUser> _nearbyMap = {};
   final Map<String, DateTime> _lastDetectionWriteAt = {};
+
+  // ── EWMA RSSI smoothing (dart-side) ─────────────────────────────────────
+  // Seconda barriera dopo lo smoothing nativo (Android/iOS).
+  // Gestisce anche i casi in cui il plugin nativo non abbia già smoothato
+  // (es. vecchie build o test diretti con il canale).
+  // α=0.3: più reattivo lato Dart perché il nativo ha già smorzato.
+  final Map<String, double> _rssiSmoothed = {};
+  static const double _ewmaAlpha = 0.3;
+
+  // Emit throttle: non riemettere la lista per lo stesso UID più spesso
+  // di una volta ogni _minEmitIntervalMs. Evita rebuild UI inutili.
+  final Map<String, DateTime> _lastEmitForUid = {};
+  static const int _minEmitIntervalMs = 900;
+  // ─────────────────────────────────────────────────────────────────────────
+
   final StreamController<List<NearbyUser>> _nearbyController =
       StreamController<List<NearbyUser>>.broadcast();
 
@@ -71,14 +87,11 @@ class NearbyDetectionService {
     required BleScannerService scanner,
   }) async {
     if (_scanSub != null) {
-      // Se sta già girando sullo stesso evento, non fare nulla.
       if (_eventId == eventId &&
           _myUid == myUid &&
           _mySessionBleId == mySessionBleId) {
         return;
       }
-
-      // Se per qualche motivo era partito su uno stato diverso, pulisci.
       clear();
     }
 
@@ -93,9 +106,6 @@ class NearbyDetectionService {
       onError: (e) => Log.e('NEARBY', 'Errore stream detections', e),
     );
 
-    // Listener live sul bleMapping:
-    // se un utente cambia foto/nome/ruolo, aggiorniamo la cache
-    // e anche i nearby già presenti in lista.
     _mappingSub = _db
         .collection('events')
         .doc(eventId)
@@ -142,7 +152,6 @@ class NearbyDetectionService {
     }
   }
 
-  /// Aggiorna cache + nearbyMap quando cambia il bleMapping.
   void _onMappingChange(QuerySnapshot<Map<String, dynamic>> snap) {
     bool anyChange = false;
 
@@ -160,8 +169,6 @@ class NearbyDetectionService {
 
       _resolveCache[doc.id] = newProfile;
 
-      // Se questo utente è già nei nearby, aggiorna il profilo
-      // ma mantieni gli attributi runtime (rssi, lastSeen).
       final existing = _nearbyMap[newProfile.uid];
       if (existing != null) {
         _nearbyMap[newProfile.uid] = NearbyUser(
@@ -189,10 +196,52 @@ class NearbyDetectionService {
   Future<void> _onRawDetection(RawBleDetection raw) async {
     if (raw.sessionBleId == _mySessionBleId) return;
 
+    // ── EWMA smoothing dart-side ─────────────────────────────────────────
+    final prevSmoothed = _rssiSmoothed[raw.sessionBleId];
+    final smoothedRssi = prevSmoothed == null
+        ? raw.rssi.toDouble()
+        : _ewmaAlpha * raw.rssi + (1.0 - _ewmaAlpha) * prevSmoothed;
+    _rssiSmoothed[raw.sessionBleId] = smoothedRssi;
+    final rssiInt = smoothedRssi.round();
+    // ─────────────────────────────────────────────────────────────────────
+
     final profile = await _resolve(raw.sessionBleId);
     if (profile == null) return;
     if (profile.uid.isEmpty) return;
     if (profile.uid == _myUid) return;
+
+    // Emit throttle: se abbiamo già emesso per questo UID recentemente
+    // e il RSSI smoothed non è cambiato significativamente (< 3 dBm),
+    // saltiamo l'emit per non inondare la UI di rebuild.
+    final now = DateTime.now();
+    final lastEmit = _lastEmitForUid[profile.uid];
+    final existing = _nearbyMap[profile.uid];
+
+    final rssiDelta = existing != null ? (rssiInt - existing.rssi).abs() : 999;
+    final sinceLastEmitMs = lastEmit != null
+        ? now.difference(lastEmit).inMilliseconds
+        : 999999;
+
+    if (sinceLastEmitMs < _minEmitIntervalMs && rssiDelta < 3) {
+      // Aggiorna comunque il nearbyMap (per stale tracking), ma non emit.
+      if (existing != null) {
+        _nearbyMap[profile.uid] = NearbyUser(
+          uid: existing.uid,
+          displayName: existing.displayName,
+          company: existing.company,
+          role: existing.role,
+          avatarURL: existing.avatarURL,
+          bio: existing.bio,
+          email: existing.email,
+          linkedin: existing.linkedin,
+          phone: existing.phone,
+          rssi: rssiInt,
+          lastSeen: raw.timestamp,
+        );
+      }
+      _writeDetection(profile.uid, rssiInt);
+      return;
+    }
 
     _nearbyMap[profile.uid] = NearbyUser(
       uid: profile.uid,
@@ -204,11 +253,12 @@ class NearbyDetectionService {
       email: '',
       linkedin: '',
       phone: '',
-      rssi: raw.rssi,
+      rssi: rssiInt,
       lastSeen: raw.timestamp,
     );
 
-    _writeDetection(profile.uid, raw.rssi);
+    _lastEmitForUid[profile.uid] = now;
+    _writeDetection(profile.uid, rssiInt);
     _emit();
   }
 
@@ -291,6 +341,12 @@ class NearbyDetectionService {
     for (final uid in staleUids) {
       _nearbyMap.remove(uid);
       _lastDetectionWriteAt.remove(uid);
+      _rssiSmoothed.removeWhere((key, _) {
+        // key è sessionBleId, non uid; non possiamo mappare qui facilmente.
+        // Pulizia conservativa: lasciamo; la map è piccola.
+        return false;
+      });
+      _lastEmitForUid.remove(uid);
     }
 
     _emit();
@@ -324,6 +380,8 @@ class NearbyDetectionService {
     _nearbyMap.clear();
     _resolveCache.clear();
     _lastDetectionWriteAt.clear();
+    _rssiSmoothed.clear();
+    _lastEmitForUid.clear();
 
     _eventId = null;
     _myUid = null;

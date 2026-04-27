@@ -4,7 +4,7 @@ import CoreBluetooth
 import CoreLocation
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppViewController {
 
   override func application(
     _ application: UIApplication,
@@ -18,6 +18,14 @@ import CoreLocation
 
     ProxiMeetBeaconPlugin.register(with: controller.binaryMessenger)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // Riavvia il ranging quando l'app torna in foreground.
+  // Necessario perché CoreLocation ferma il ranging dopo alcuni minuti
+  // in background e non lo riprende automaticamente al rientro.
+  override func applicationDidBecomeActive(_ application: UIApplication) {
+    super.applicationDidBecomeActive(application)
+    ProxiMeetBeaconPlugin.shared.resumeRanging()
   }
 }
 
@@ -34,6 +42,22 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   private var minor: CLBeaconMinorValue = 0
 
   private let regionIdentifier = "com.ionut.proximeet.proximeeet_app.ibeacon"
+
+  // ── EWMA RSSI smoothing ───────────────────────────────────────────────────
+  // Chiave: "major_minor", valore: RSSI smoothed.
+  // alpha=0.25 → 75% peso al precedente, 25% al nuovo packet.
+  private var rssiSmoothed: [String: Double] = [:]
+  private let ewmaAlpha: Double = 0.25
+
+  // Rate-limit emit per non inondare Flutter con ogni ranging tick (1Hz su iOS).
+  private var lastEmitAt: [String: TimeInterval] = [:]
+  private let minEmitInterval: TimeInterval = 0.8
+
+  // Timer per riavviare il ranging ogni 30 secondi.
+  // CoreLocation ranging può fermarsi silenziosamente su alcuni device.
+  private var rangingRestartTimer: Timer?
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   static func register(with messenger: FlutterBinaryMessenger) {
     let methodChannel = FlutterMethodChannel(
@@ -123,14 +147,18 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
 
     self.major = CLBeaconMajorValue(major)
     self.minor = CLBeaconMinorValue(minor)
+    rssiSmoothed.removeAll()
+    lastEmitAt.removeAll()
 
     let lm = CLLocationManager()
     lm.delegate = self
     lm.pausesLocationUpdatesAutomatically = false
 
-    if Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") != nil {
-      lm.allowsBackgroundLocationUpdates = true
-    }
+    // FIX: allowsBackgroundLocationUpdates deve essere sempre true
+    // (non condizionale su UIBackgroundModes), così il ranging continua
+    // quando l'app va in background (richiede "Always" authorization).
+    lm.allowsBackgroundLocationUpdates = true
+    lm.showsBackgroundLocationIndicator = false
 
     locationManager = lm
 
@@ -149,6 +177,11 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
 
     peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
 
+    // FIX: richiedere "Always" invece di "WhenInUse".
+    // Con "WhenInUse" il ranging si ferma appena l'app va in background,
+    // causando il bug asimmetrico: chi è in background non vede nessuno.
+    // Con "Always" il ranging continua anche in background.
+    // Info.plist deve avere NSLocationAlwaysAndWhenInUseUsageDescription.
     let status: CLAuthorizationStatus
     if #available(iOS 14.0, *) {
       status = lm.authorizationStatus
@@ -157,19 +190,43 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     }
 
     if status == .notDetermined {
-      // Foreground ranging funziona con When In Use. Always è utile solo per background.
-      lm.requestWhenInUseAuthorization()
+      lm.requestAlwaysAuthorization()
     } else {
       handleAuthorizationStatus(status, manager: lm)
     }
+
+    // Avvia il timer di restart ranging: ogni 30 secondi verifica
+    // e riavvia il ranging se è fermo (protezione contro lo stop silenzioso
+    // di CoreLocation che si verifica su alcuni device iOS).
+    startRangingRestartTimer()
 
     // Il join Dart non deve restare bloccato in attesa dei permessi.
     result(true)
   }
 
+  // Avvia (o riavvia) il timer che mantiene il ranging attivo.
+  private func startRangingRestartTimer() {
+    rangingRestartTimer?.invalidate()
+    rangingRestartTimer = Timer.scheduledTimer(
+      withTimeInterval: 30.0,
+      repeats: true
+    ) { [weak self] _ in
+      guard let self = self, let lm = self.locationManager else { return }
+      self.startRangingIfPossible(manager: lm)
+    }
+  }
+
+  // Chiamato da AppDelegate.applicationDidBecomeActive.
+  func resumeRanging() {
+    guard let lm = locationManager else { return }
+    startRangingIfPossible(manager: lm)
+    startRangingRestartTimer()
+  }
+
   private func startRangingIfPossible(manager: CLLocationManager) {
     guard let rx = rxRegion else { return }
 
+    // Avvia sempre il monitoring (necessario per background entry events).
     manager.startMonitoring(for: rx)
 
     if #available(iOS 13.0, *) {
@@ -243,6 +300,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     }
   }
 
+  // Chiamato una volta al secondo da CoreLocation (in foreground).
   func locationManager(
     _ manager: CLLocationManager,
     didRange beacons: [CLBeacon],
@@ -251,6 +309,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     handleRangedBeacons(beacons)
   }
 
+  // Fallback per iOS < 13.
   func locationManager(
     _ manager: CLLocationManager,
     didRangeBeacons beacons: [CLBeacon],
@@ -260,20 +319,43 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   }
 
   private func handleRangedBeacons(_ beacons: [CLBeacon]) {
-    for beacon in beacons where beacon.rssi != 0 {
+    let now = Date().timeIntervalSince1970
+
+    for beacon in beacons {
+      // Filtra RSSI invalidi: 0 = non disponibile, < -100 = rumore.
+      guard beacon.rssi != 0 && beacon.rssi > -100 else { continue }
+
       let foundMajor = beacon.major.intValue
       let foundMinor = beacon.minor.intValue
 
-      if foundMajor == Int(major) && foundMinor == Int(minor) {
-        continue
+      // Non segnalare sé stessi.
+      if foundMajor == Int(major) && foundMinor == Int(minor) { continue }
+
+      let key = "\(foundMajor)_\(foundMinor)"
+
+      // ── EWMA smoothing ────────────────────────────────────────────────────
+      let rawRssi = Double(beacon.rssi)
+      let prev = rssiSmoothed[key]
+      let smoothed: Double
+      if let p = prev {
+        smoothed = ewmaAlpha * rawRssi + (1.0 - ewmaAlpha) * p
+      } else {
+        smoothed = rawRssi
       }
+      rssiSmoothed[key] = smoothed
+      // ──────────────────────────────────────────────────────────────────────
+
+      // Rate-limit: CoreLocation chiama didRange ogni ~1 secondo.
+      // Con beacon multipli, limitiamo comunque a MIN_EMIT_INTERVAL per coerenza.
+      let last = lastEmitAt[key] ?? 0.0
+      if now - last < minEmitInterval { continue }
+      lastEmitAt[key] = now
 
       eventSink?([
         "type": "beacon",
         "major": foundMajor,
         "minor": foundMinor,
-        "rssi": beacon.rssi,
-        "accuracy": beacon.accuracy,
+        "rssi": Int(smoothed),
         "platform": "ios"
       ])
     }
@@ -304,6 +386,9 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   }
 
   private func stop() {
+    rangingRestartTimer?.invalidate()
+    rangingRestartTimer = nil
+
     peripheralManager?.stopAdvertising()
     peripheralManager = nil
 
@@ -326,5 +411,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     locationManager = nil
     txRegion = nil
     rxRegion = nil
+    rssiSmoothed.removeAll()
+    lastEmitAt.removeAll()
   }
 }
