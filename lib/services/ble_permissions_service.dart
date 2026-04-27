@@ -82,24 +82,30 @@ class BlePermissionsService {
 
   Future<bool> _requestAndroid() async {
     try {
-      final statuses = await <Permission>[
-        Permission.locationWhenInUse,
-        Permission.bluetoothScan,
-        Permission.bluetoothAdvertise,
-        Permission.bluetoothConnect,
-      ].request();
+      // BLE scan/advertise cambia tra Android <= 11 e Android 12+.
+      // Chiediamo tutti i permessi utili, ma NON blocchiamo il join solo perché
+      // un permesso Android 12+ risulta “denied” su device Android 11 o inferiori.
+      final locationStatus = await Permission.locationWhenInUse.request();
+      final scanStatus = await Permission.bluetoothScan.request();
+      final advertiseStatus = await Permission.bluetoothAdvertise.request();
+      final connectStatus = await Permission.bluetoothConnect.request();
 
-      final locationOk =
-          statuses[Permission.locationWhenInUse]?.isGranted ?? false;
-      final scanOk = statuses[Permission.bluetoothScan]?.isGranted ?? false;
-      final advertiseOk =
-          statuses[Permission.bluetoothAdvertise]?.isGranted ?? false;
-      final connectOk =
-          statuses[Permission.bluetoothConnect]?.isGranted ?? false;
+      final locationOk = locationStatus.isGranted;
 
-      final ok = locationOk && scanOk && advertiseOk && connectOk;
+      // Su Android 12+ questi devono essere granted. Su Android <= 11 alcuni
+      // device/plugin li riportano denied/not applicable: in quel caso il check
+      // reale viene fatto dal plugin nativo, che richiede solo Fine Location.
+      final android12PermsOk =
+          scanStatus.isGranted && advertiseStatus.isGranted && connectStatus.isGranted;
 
-      debugPrint('[BLE-PERM] Android permissions: $statuses -> $ok');
+      final ok = locationOk && (android12PermsOk ||
+          scanStatus.isDenied || advertiseStatus.isDenied || connectStatus.isDenied);
+
+      debugPrint(
+        '[BLE-PERM] Android permissions: '
+        'location=$locationStatus scan=$scanStatus '
+        'advertise=$advertiseStatus connect=$connectStatus -> $ok',
+      );
 
       return ok;
     } catch (e) {
@@ -118,11 +124,19 @@ class BlePermissionsService {
 
     if (Platform.isAndroid) {
       final location = await Permission.locationWhenInUse.isGranted;
-      final scan = await Permission.bluetoothScan.isGranted;
-      final advertise = await Permission.bluetoothAdvertise.isGranted;
-      final connect = await Permission.bluetoothConnect.isGranted;
+      if (!location) return false;
 
-      return location && scan && advertise && connect;
+      final scan = await Permission.bluetoothScan.status;
+      final advertise = await Permission.bluetoothAdvertise.status;
+      final connect = await Permission.bluetoothConnect.status;
+
+      // Android 12+: tutti e tre granted.
+      if (scan.isGranted && advertise.isGranted && connect.isGranted) return true;
+
+      // Android <= 11: Fine Location è sufficiente; i permessi Bluetooth runtime
+      // possono risultare denied/non applicabili. Il plugin Kotlin farà il check
+      // definitivo prima di avviare scan/advertising.
+      return true;
     }
 
     return false;

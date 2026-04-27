@@ -126,6 +126,15 @@ class ProxiMeetBeaconPlugin(
         advertiser = bluetoothAdapter.bluetoothLeAdvertiser
         scanner = bluetoothAdapter.bluetoothLeScanner
 
+        if (advertiser == null) {
+            result.error("ADV_NULL", "BLE advertiser non disponibile", null)
+            return
+        }
+        if (scanner == null) {
+            result.error("SCAN_NULL", "BLE scanner non disponibile", null)
+            return
+        }
+
         startAdvertising(parsedUuid, major, minor)
         startScanning(parsedUuid)
 
@@ -196,7 +205,10 @@ class ProxiMeetBeaconPlugin(
             }
         }
 
-        scanner?.startScan(emptyList(), settings, scanCallback)
+        // null invece di emptyList(): su alcuni stack Android/OEM lo scan con lista
+        // vuota è trattato come “nessun filtro” in teoria, ma in pratica può non
+        // emettere callback. null è il path più compatibile per scan non filtrato.
+        scanner?.startScan(null, settings, scanCallback)
     }
 
     private fun parseIBeacon(result: ScanResult, expectedUuid: UUID): Map<String, Any>? {
