@@ -9,7 +9,37 @@ import '../models/nearby_user.dart';
 import 'debug_error_service.dart';
 
 class PlatformBeaconService {
-  PlatformBeaconService._();
+  PlatformBeaconService._() {
+    // ── FIX iOS BEACON_START_FALSE ─────────────────────────────────────────
+    // La sottoscrizione all'EventChannel viene fatta UNA SOLA VOLTA qui,
+    // alla creazione del singleton.
+    //
+    // BUG ORIGINALE: _events.receiveBroadcastStream().listen() era chiamato
+    // dentro start(), e stop() faceva cancel() su quella subscription.
+    // Su iOS, ri-sottoscriversi all'EventChannel dopo un cancel lancia
+    // una PlatformException silenziosa nel catch block di start(),
+    // che ritornava false → BEACON_START_FALSE.
+    //
+    // FIX: la subscription vive per tutta la vita del singleton.
+    // Non viene mai cancellata (solo in dispose()).
+    // start() e stop() chiamano solo il MethodChannel nativo per
+    // avviare/fermare advertising+ranging; lo stream di eventi rimane aperto.
+    // ─────────────────────────────────────────────────────────────────────────
+    _nativeSub = _events.receiveBroadcastStream().listen(
+      _onNativeEvent,
+      onError: (Object e, StackTrace st) {
+        _lastError = DebugErrorService.instance.fromException(
+          area: 'BEACON_NATIVE_EVENTS',
+          fallbackTitle: 'Errore eventi nativi beacon',
+          fallbackMessage: 'Il canale EventChannel ha restituito un errore.',
+          fallbackSuggestion:
+              'Controlla AppDelegate.swift / ProxiMeetBeaconPlugin.kt.',
+          error: e,
+          stackTrace: st,
+        );
+      },
+    );
+  }
 
   static final PlatformBeaconService instance = PlatformBeaconService._();
 
@@ -19,7 +49,9 @@ class PlatformBeaconService {
   final StreamController<RawBleDetection> _controller =
       StreamController<RawBleDetection>.broadcast();
 
+  // Subscription persistente: non viene mai cancellata fuori da dispose().
   StreamSubscription<dynamic>? _nativeSub;
+
   bool _isRunning = false;
   String? _myBeaconKey;
   AppDebugError? _lastError;
@@ -40,31 +72,19 @@ class PlatformBeaconService {
         area: 'BEACON_START',
         code: 'INVALID_BEACON_KEY',
         message: 'La chiave beacon deve essere nel formato 00000_00000.',
-        suggestion: 'Controlla EventSessionService._generateBeaconKey() e AppConstants.beaconKey().',
+        suggestion:
+            'Controlla EventSessionService._generateBeaconKey() e AppConstants.beaconKey().',
         data: <String, Object?>{'beaconKey': beaconKey},
       ));
       return false;
     }
 
-    await stop();
+    // Ferma il native precedente senza toccare la subscription EventChannel.
+    await _stopNative();
+
     final parsed = AppConstants.parseBeaconKey(beaconKey);
 
     try {
-      _nativeSub = _events.receiveBroadcastStream().listen(
-        _onNativeEvent,
-        onError: (Object e, StackTrace st) {
-          _lastError = DebugErrorService.instance.fromException(
-            area: 'BEACON_NATIVE_EVENTS',
-            fallbackTitle: 'Errore eventi nativi beacon',
-            fallbackMessage: 'Il canale EventChannel ha restituito un errore.',
-            fallbackSuggestion: 'Controlla AppDelegate.swift / ProxiMeetBeaconPlugin.kt.',
-            error: e,
-            stackTrace: st,
-            data: <String, Object?>{'beaconKey': beaconKey},
-          );
-        },
-      );
-
       final ok = await _method.invokeMethod<bool>('start', <String, dynamic>{
         'uuid': AppConstants.proximeetBeaconUuid,
         'major': parsed.major,
@@ -77,7 +97,8 @@ class PlatformBeaconService {
           area: 'BEACON_START',
           code: 'NATIVE_START_RETURNED_FALSE',
           message: 'Il metodo nativo start ha risposto false/null.',
-          suggestion: 'Controlla lo stato Bluetooth e i log nativi. Il join deve continuare comunque.',
+          suggestion:
+              'Controlla lo stato Bluetooth e i log nativi. Il join deve continuare comunque.',
           data: <String, Object?>{
             'beaconKey': beaconKey,
             'uuid': AppConstants.proximeetBeaconUuid,
@@ -86,7 +107,6 @@ class PlatformBeaconService {
             'nativeResult': ok,
           },
         ));
-        await stop();
         return false;
       }
 
@@ -99,7 +119,8 @@ class PlatformBeaconService {
         area: 'BEACON_START',
         fallbackTitle: 'Errore avvio iBeacon',
         fallbackMessage: 'Il plugin nativo non ha avviato advertising/ranging.',
-        fallbackSuggestion: 'Controlla MethodChannel proximeet/beacon, permessi e codice Swift/Kotlin.',
+        fallbackSuggestion:
+            'Controlla MethodChannel proximeet/beacon, permessi e codice Swift/Kotlin.',
         error: e,
         stackTrace: st,
         data: <String, Object?>{
@@ -109,7 +130,6 @@ class PlatformBeaconService {
           'minor': parsed.minor,
         },
       );
-      await stop();
       return false;
     }
   }
@@ -141,8 +161,10 @@ class PlatformBeaconService {
         title: 'Evento beacon senza major/minor',
         area: 'BEACON_NATIVE_EVENTS',
         code: 'MISSING_MAJOR_MINOR',
-        message: 'Il plugin nativo ha inviato un beacon senza major/minor validi.',
-        suggestion: 'Controlla handleRangedBeacons in Swift e parseIBeacon in Kotlin.',
+        message:
+            'Il plugin nativo ha inviato un beacon senza major/minor validi.',
+        suggestion:
+            'Controlla handleRangedBeacons in Swift e parseIBeacon in Kotlin.',
         data: Map<String, Object?>.from(event),
       ));
       return;
@@ -166,7 +188,8 @@ class PlatformBeaconService {
     return null;
   }
 
-  Future<void> stop() async {
+  /// Ferma il plugin nativo senza toccare la subscription EventChannel.
+  Future<void> _stopNative() async {
     try {
       await _method.invokeMethod<void>('stop');
     } catch (e, st) {
@@ -174,21 +197,25 @@ class PlatformBeaconService {
         area: 'BEACON_STOP',
         fallbackTitle: 'Errore stop iBeacon',
         fallbackMessage: 'Il plugin nativo non ha confermato lo stop.',
-        fallbackSuggestion: 'Di solito non è bloccante. Controlla se il plugin è registrato.',
+        fallbackSuggestion:
+            'Di solito non è bloccante. Controlla se il plugin è registrato.',
         error: e,
         stackTrace: st,
       );
     }
-
-    await _nativeSub?.cancel();
-    _nativeSub = null;
     _isRunning = false;
     _myBeaconKey = null;
+  }
+
+  Future<void> stop() async {
+    await _stopNative();
     Log.d('BEACON', 'Fermato');
   }
 
   void dispose() {
-    stop();
+    _stopNative();
+    _nativeSub?.cancel();
+    _nativeSub = null;
     _controller.close();
   }
 }

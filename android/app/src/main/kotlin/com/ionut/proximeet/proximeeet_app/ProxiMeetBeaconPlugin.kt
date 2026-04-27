@@ -48,14 +48,10 @@ class ProxiMeetBeaconPlugin(
     private var myMinor: Int = -1
 
     // ── EWMA RSSI smoothing ──────────────────────────────────────────────────
-    // Chiave: "major_minor", valore: RSSI smoothed (float per precisione).
-    // alpha=0.25 → 25% peso al nuovo valore, 75% all'EWMA precedente.
-    // Stabilizza il segnale senza introdurre troppa latenza alla risposta.
     private val rssiSmoothed = mutableMapOf<String, Float>()
     private val EWMA_ALPHA = 0.25f
 
-    // Rate-limit emit: non inviare lo stesso beacon a Flutter più di
-    // una volta ogni MIN_EMIT_INTERVAL_MS (evita flood UI inutile).
+    // Rate-limit emit: max 1 evento ogni MIN_EMIT_INTERVAL_MS per beacon.
     private val lastEmitAt = mutableMapOf<String, Long>()
     private val MIN_EMIT_INTERVAL_MS = 800L
 
@@ -78,12 +74,10 @@ class ProxiMeetBeaconPlugin(
 
                 start(uuidString, major, minor, result)
             }
-
             "stop" -> {
                 stop()
                 result.success(true)
             }
-
             else -> result.notImplemented()
         }
     }
@@ -96,23 +90,13 @@ class ProxiMeetBeaconPlugin(
         eventSink = null
     }
 
-    private fun start(
-        uuidString: String,
-        major: Int,
-        minor: Int,
-        result: MethodChannel.Result
-    ) {
+    private fun start(uuidString: String, major: Int, minor: Int, result: MethodChannel.Result) {
         if (major !in 0..65535 || minor !in 0..65535) {
             result.error("BAD_MAJOR_MINOR", "major/minor devono essere compresi tra 0 e 65535", null)
             return
         }
 
-        val parsedUuid = try {
-            UUID.fromString(uuidString)
-        } catch (_: Exception) {
-            null
-        }
-
+        val parsedUuid = try { UUID.fromString(uuidString) } catch (_: Exception) { null }
         if (parsedUuid == null) {
             result.error("BAD_UUID", "UUID iBeacon non valido: $uuidString", null)
             return
@@ -158,17 +142,11 @@ class ProxiMeetBeaconPlugin(
         }
     }
 
-    private fun hasPermission(permission: String): Boolean {
-        return activity.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
-    }
+    private fun hasPermission(permission: String): Boolean =
+        activity.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
     private fun startAdvertising(uuid: UUID, major: Int, minor: Int) {
-        val payload = buildIBeaconPayload(
-            uuid = uuid,
-            major = major,
-            minor = minor,
-            txPower = DEFAULT_TX_POWER
-        )
+        val payload = buildIBeaconPayload(uuid, major, minor, DEFAULT_TX_POWER)
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -185,22 +163,10 @@ class ProxiMeetBeaconPlugin(
 
         advertiseCallback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                eventSink?.success(
-                    mapOf(
-                        "type" to "advertiseStarted",
-                        "platform" to "android"
-                    )
-                )
+                eventSink?.success(mapOf("type" to "advertiseStarted", "platform" to "android"))
             }
-
             override fun onStartFailure(errorCode: Int) {
-                eventSink?.success(
-                    mapOf(
-                        "type" to "advertiseError",
-                        "code" to errorCode,
-                        "platform" to "android"
-                    )
-                )
+                eventSink?.success(mapOf("type" to "advertiseError", "code" to errorCode, "platform" to "android"))
             }
         }
 
@@ -213,42 +179,20 @@ class ProxiMeetBeaconPlugin(
             .setReportDelay(0)
             .build()
 
-        // ── FIX CRITICO: NESSUN ScanFilter ─────────────────────────────────
-        //
-        // BUG ORIGINALE: usare ScanFilter.setManufacturerData(APPLE_COMPANY_ID, ...)
-        // causa un problema documentato e diffuso su Android: molti OEM
-        // (Xiaomi, Samsung, Huawei, OnePlus, Motorola...) filtrano o bloccano
-        // a livello di driver BLE i pacchetti con manufacturer company ID Apple
-        // (0x004C), probabilmente per evitare che app di terze parti
-        // intercettino traffico AirDrop/AirPods. Il risultato è che lo scan
-        // non restituisce nessun risultato anche quando ci sono beacon vicini,
-        // e il bug si manifesta in modo asimmetrico: un device vede l'altro
-        // ma non viceversa, a seconda del modello del telefono.
-        //
-        // FIX: scan senza filtri HW (emptyList()). Tutti i pacchetti BLE
-        // arrivano al callback e parseIBeacon filtra per UUID → corretto
-        // e sicuro. L'impatto sulla batteria è trascurabile per un'app
-        // di networking in foreground.
-        // ────────────────────────────────────────────────────────────────────
+        // ── FIX: scan senza ScanFilter ────────────────────────────────────────
+        // ScanFilter.setManufacturerData(APPLE_COMPANY_ID, ...) viene silenziosamente
+        // ignorato/bloccato su Xiaomi, Samsung, Huawei, OnePlus ecc.
+        // Scan senza filtri → parseIBeacon filtra per UUID (sicuro).
+        // ─────────────────────────────────────────────────────────────────────
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 parseIBeacon(result, uuid)?.let { eventSink?.success(it) }
             }
-
             override fun onBatchScanResults(results: MutableList<ScanResult>) {
-                results.forEach { scanResult ->
-                    parseIBeacon(scanResult, uuid)?.let { eventSink?.success(it) }
-                }
+                results.forEach { parseIBeacon(it, uuid)?.let { ev -> eventSink?.success(ev) } }
             }
-
             override fun onScanFailed(errorCode: Int) {
-                eventSink?.success(
-                    mapOf(
-                        "type" to "scanError",
-                        "code" to errorCode,
-                        "platform" to "android"
-                    )
-                )
+                eventSink?.success(mapOf("type" to "scanError", "code" to errorCode, "platform" to "android"))
             }
         }
 
@@ -256,42 +200,40 @@ class ProxiMeetBeaconPlugin(
     }
 
     private fun parseIBeacon(result: ScanResult, expectedUuid: UUID): Map<String, Any>? {
-        val bytes = result.scanRecord?.getManufacturerSpecificData(APPLE_COMPANY_ID) ?: return null
+        // ── Tentativo 1: API standard ─────────────────────────────────────────
+        // getManufacturerSpecificData restituisce null su alcuni OEM Android
+        // che strippano i dati Apple a livello di driver BLE.
+        val bytes = result.scanRecord?.getManufacturerSpecificData(APPLE_COMPANY_ID)
+        // ── Tentativo 2: parsing raw bytes ────────────────────────────────────
+        // Leggiamo direttamente i byte grezzi del pacchetto BLE advertisement.
+        // Questo bypassa il filtro OEM e funziona anche quando l'API restituisce null.
+            ?: parseManufacturerDataFromRawBytes(result)
+            ?: return null
 
+        // Valida formato iBeacon
         if (bytes.size < IBEACON_PAYLOAD_LENGTH) return null
         if (bytes[0] != 0x02.toByte() || bytes[1] != 0x15.toByte()) return null
 
+        // Valida UUID
         val uuidBuffer = ByteBuffer.wrap(bytes, 2, 16)
         val foundUuid = UUID(uuidBuffer.long, uuidBuffer.long)
         if (foundUuid != expectedUuid) return null
 
-        val major = ((bytes[18].toInt() and 0xFF) shl 8) or
-            (bytes[19].toInt() and 0xFF)
-        val minor = ((bytes[20].toInt() and 0xFF) shl 8) or
-            (bytes[21].toInt() and 0xFF)
+        val major = ((bytes[18].toInt() and 0xFF) shl 8) or (bytes[19].toInt() and 0xFF)
+        val minor = ((bytes[20].toInt() and 0xFF) shl 8) or (bytes[21].toInt() and 0xFF)
 
-        // Evita di rilevare sé stessi.
         if (major == myMajor && minor == myMinor) return null
 
-        // Scarta RSSI non validi (0 = non disponibile, < -100 = rumore puro).
         val rawRssi = result.rssi
         if (rawRssi == 0 || rawRssi < -100) return null
 
         // ── EWMA smoothing ──────────────────────────────────────────────────
-        // Ogni packet BLE ha RSSI variabile (±10-20 dBm è normale).
-        // L'EWMA stabilizza la distanza percepita senza latenza eccessiva.
         val key = "${major}_${minor}"
         val prev = rssiSmoothed[key]
-        val smoothed: Float = if (prev == null) {
-            rawRssi.toFloat()
-        } else {
-            EWMA_ALPHA * rawRssi.toFloat() + (1f - EWMA_ALPHA) * prev
-        }
+        val smoothed = if (prev == null) rawRssi.toFloat()
+                       else EWMA_ALPHA * rawRssi.toFloat() + (1f - EWMA_ALPHA) * prev
         rssiSmoothed[key] = smoothed
-        // ────────────────────────────────────────────────────────────────────
 
-        // Rate-limit emit: un beacon attivo può inviare ogni 100-300ms.
-        // Limitare a MAX 1 evento/800ms per evitare flood alla UI Flutter.
         val now = System.currentTimeMillis()
         val last = lastEmitAt[key] ?: 0L
         if (now - last < MIN_EMIT_INTERVAL_MS) return null
@@ -306,14 +248,55 @@ class ProxiMeetBeaconPlugin(
         )
     }
 
-    private fun buildIBeaconPayload(
-        uuid: UUID,
-        major: Int,
-        minor: Int,
-        txPower: Int
-    ): ByteArray {
-        val buffer = ByteBuffer.allocate(IBEACON_PAYLOAD_LENGTH)
+    /**
+     * Parsing manuale dei byte grezzi dell'advertisement BLE.
+     *
+     * Struttura AD (Advertising Data):
+     *   [length][type][data...]  ripetuto per ogni record
+     *
+     * Per Manufacturer Specific Data (type = 0xFF):
+     *   [length][0xFF][company_id_low][company_id_high][data...]
+     *
+     * Restituisce i byte DOPO company_id (stessa struttura di
+     * getManufacturerSpecificData), o null se non trovato.
+     */
+    private fun parseManufacturerDataFromRawBytes(result: ScanResult): ByteArray? {
+        val rawBytes = result.scanRecord?.bytes ?: return null
+        var offset = 0
 
+        while (offset < rawBytes.size) {
+            val length = rawBytes[offset].toInt() and 0xFF
+            if (length == 0) break
+            if (offset + length >= rawBytes.size) break
+
+            val adType = rawBytes[offset + 1].toInt() and 0xFF
+
+            // 0xFF = Manufacturer Specific Data
+            if (adType == 0xFF && length >= 3) {
+                val companyIdLow  = rawBytes[offset + 2].toInt() and 0xFF
+                val companyIdHigh = rawBytes[offset + 3].toInt() and 0xFF
+                val companyId = (companyIdHigh shl 8) or companyIdLow
+
+                if (companyId == APPLE_COMPANY_ID) {
+                    // I dati iniziano dopo i 2 byte company_id.
+                    // length comprende il byte type (0xFF) e i 2 byte company_id,
+                    // quindi i dati utili sono (length - 3) byte.
+                    val dataStart = offset + 4
+                    val dataLength = length - 3
+                    if (dataLength > 0 && dataStart + dataLength <= rawBytes.size) {
+                        return rawBytes.copyOfRange(dataStart, dataStart + dataLength)
+                    }
+                }
+            }
+
+            offset += length + 1
+        }
+
+        return null
+    }
+
+    private fun buildIBeaconPayload(uuid: UUID, major: Int, minor: Int, txPower: Int): ByteArray {
+        val buffer = ByteBuffer.allocate(IBEACON_PAYLOAD_LENGTH)
         buffer.put(0x02.toByte())
         buffer.put(0x15.toByte())
         buffer.putLong(uuid.mostSignificantBits)
@@ -323,25 +306,12 @@ class ProxiMeetBeaconPlugin(
         buffer.put(((minor shr 8) and 0xFF).toByte())
         buffer.put((minor and 0xFF).toByte())
         buffer.put(txPower.toByte())
-
         return buffer.array()
     }
 
     fun stop() {
-        try {
-            advertiseCallback?.let { callback ->
-                advertiser?.stopAdvertising(callback)
-            }
-        } catch (_: Exception) {
-        }
-
-        try {
-            scanCallback?.let { callback ->
-                scanner?.stopScan(callback)
-            }
-        } catch (_: Exception) {
-        }
-
+        try { advertiseCallback?.let { advertiser?.stopAdvertising(it) } } catch (_: Exception) {}
+        try { scanCallback?.let { scanner?.stopScan(it) } } catch (_: Exception) {}
         advertiseCallback = null
         scanCallback = null
         advertiser = null
