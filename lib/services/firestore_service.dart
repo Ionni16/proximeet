@@ -232,7 +232,9 @@ class FirestoreService {
       'email': profile.email,
       'phone': profile.phone ?? '',
       'linkedin': profile.linkedin ?? '',
-      'avatarURL': profile.avatarURL,
+      'avatarURL': profile.avatarURL.trim(),
+      'avatarUrl': profile.avatarURL.trim(),
+      'photoURL': profile.avatarURL.trim(),
       'connectedAt': FieldValue.serverTimestamp(),
       'connectedAtClient': Timestamp.now(),
       'eventName': eventName,
@@ -258,6 +260,62 @@ class FirestoreService {
 
   // ── WALLET ──────────────────────────────────────────────
 
+  Future<WalletContact> _hydrateWalletContactWithLiveProfile(
+    WalletContact contact,
+  ) async {
+    try {
+      final profile = await getUserByUid(contact.uid);
+
+      if (profile == null) {
+        return contact;
+      }
+
+      final liveAvatarURL = profile.avatarURL.trim();
+
+      if (liveAvatarURL.isEmpty) {
+        return contact;
+      }
+
+      return WalletContact(
+        uid: contact.uid,
+        firstName: profile.firstName.isNotEmpty
+            ? profile.firstName
+            : contact.firstName,
+        lastName: profile.lastName.isNotEmpty
+            ? profile.lastName
+            : contact.lastName,
+        company: profile.company.isNotEmpty
+            ? profile.company
+            : contact.company,
+        role: profile.role.isNotEmpty
+            ? profile.role
+            : contact.role,
+        email: profile.email.isNotEmpty
+            ? profile.email
+            : contact.email,
+        phone: profile.phone?.isNotEmpty == true
+            ? profile.phone!
+            : contact.phone,
+        linkedin: profile.linkedin?.isNotEmpty == true
+            ? profile.linkedin!
+            : contact.linkedin,
+        avatarURL: liveAvatarURL,
+        connectedAt: contact.connectedAt,
+        eventName: contact.eventName,
+        note: contact.note,
+      );
+    } catch (e, st) {
+      Log.e(
+        'FIRESTORE',
+        'Errore refresh profilo wallet ${contact.uid}',
+        e,
+        st,
+      );
+
+      return contact;
+    }
+  }
+
   Stream<List<WalletContact>> listenToWallet() {
     final myUid = FirebaseAuth.instance.currentUser?.uid;
     if (myUid == null) return Stream.value([]);
@@ -268,10 +326,16 @@ class FirestoreService {
         .collection('contacts')
         .orderBy('connectedAt', descending: true)
         .snapshots()
-        .map(
-          (snap) => snap.docs
-              .map((d) => WalletContact.fromMap(d.data()))
-              .toList(),
-        );
+        .asyncMap((snap) async {
+      final contacts = snap.docs
+          .map((d) => WalletContact.fromMap(d.data()))
+          .toList();
+
+      final hydratedContacts = await Future.wait(
+        contacts.map(_hydrateWalletContactWithLiveProfile),
+      );
+
+      return hydratedContacts;
+    });
   }
 }
