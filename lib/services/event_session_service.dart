@@ -2,281 +2,338 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:uuid/uuid.dart';
 
+import '../core/app_debug_error.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 import '../models/user_model.dart';
 import 'ble_advertiser_service.dart';
 import 'ble_scanner_service.dart';
-import 'presence_heartbeat_service.dart';
+import 'debug_error_service.dart';
 import 'nearby_detection_service.dart';
+import 'presence_heartbeat_service.dart';
 
-/// Lifecycle completo di un utente dentro un evento:
-/// join → mapping/presence → proximity best-effort → heartbeat → leave/cleanup.
-///
-/// Regola importante: BLE/iBeacon NON deve bloccare l'ingresso evento.
-/// iOS può richiedere permessi asincroni o avere Bluetooth/Location non pronti;
-/// l'utente deve entrare comunque e il rilevamento parte appena possibile.
 class EventSessionService {
   EventSessionService._();
-  static final EventSessionService instance = EventSessionService._();
+
+  static final EventSessionService shared = EventSessionService._();
+
+  static EventSessionService get instance => shared;
 
   final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   String? _currentEventId;
   String? _sessionBleId;
   bool _isInEvent = false;
-
-  bool _isJoining = false;
-  bool _isLeaving = false;
   String? _lastJoinError;
+  AppDebugError? _lastJoinDebugError;
 
   String? get currentEventId => _currentEventId;
   String? get sessionBleId => _sessionBleId;
   bool get isInEvent => _isInEvent;
-  bool get isTransitioning => _isJoining || _isLeaving;
-  bool get isJoining => _isJoining;
-  bool get isLeaving => _isLeaving;
   String? get lastJoinError => _lastJoinError;
+  AppDebugError? get lastJoinDebugError => _lastJoinDebugError;
 
   Future<bool> joinEvent({
     required String eventId,
     required UserModel user,
   }) async {
-    if (_isJoining || _isLeaving) {
-      _lastJoinError = 'Operazione già in corso. Riprova tra qualche secondo.';
-      Log.w('SESSION', 'Join ignorato: transizione già in corso');
-      return false;
+    _lastJoinError = null;
+    _lastJoinDebugError = null;
+
+    if (_isInEvent) {
+      await leaveEvent();
     }
 
-    _isJoining = true;
-    _lastJoinError = null;
+    final uid = user.uid;
+    final beaconKey = _generateBeaconKey();
+
+    _currentEventId = eventId;
+    _sessionBleId = beaconKey;
+
+    Log.d('SESSION', 'Join evento $eventId con beaconKey $beaconKey');
 
     try {
-      if (_isInEvent) {
-        await _performLeaveCleanup(markPresenceInactive: true);
-      }
+      final parsed = AppConstants.parseBeaconKey(beaconKey);
 
-      final uid = user.uid;
-      if (uid.isEmpty) {
-        _lastJoinError = 'Utente non valido. Effettua di nuovo il login.';
-        return false;
-      }
-
-      final raw = const Uuid().v4().replaceAll('-', '');
-      final major = int.parse(raw.substring(0, 4), radix: 16);
-      final minor = int.parse(raw.substring(4, 8), radix: 16);
-      final newSessionBleId = AppConstants.beaconKey(major, minor);
-
-      Log.d(
-        'SESSION',
-        'Join evento $eventId beaconKey=$newSessionBleId major=$major minor=$minor',
-      );
-
-      _currentEventId = eventId;
-      _sessionBleId = newSessionBleId;
-
-      await _writeSessionDocuments(
+      await _writeBleMapping(
         eventId: eventId,
         user: user,
-        sessionBleId: newSessionBleId,
-        major: major,
-        minor: minor,
+        beaconKey: beaconKey,
+        major: parsed.major,
+        minor: parsed.minor,
       );
 
-      // Da qui in poi l'utente è entrato nell'evento.
-      // La parte proximity parte best-effort e non può più far fallire il join.
+      await _writePresence(
+        eventId: eventId,
+        uid: uid,
+        user: user,
+        beaconKey: beaconKey,
+        major: parsed.major,
+        minor: parsed.minor,
+      );
+
+      PresenceHeartbeatService.shared.start(
+        eventId: eventId,
+        uid: uid,
+      );
+
       _isInEvent = true;
 
-      await _startProximityBestEffort(
+      await _startBeaconBestEffort(beaconKey);
+      await _startNearbyBestEffort(
         eventId: eventId,
         uid: uid,
-        sessionBleId: newSessionBleId,
+        beaconKey: beaconKey,
       );
 
-      PresenceHeartbeatService.instance.start(
-        eventId: eventId,
-        uid: uid,
-      );
-
-      Log.d('SESSION', 'Join completato');
+      Log.d('SESSION', 'Join completato con successo');
       return true;
     } catch (e, st) {
-      _lastJoinError = _friendlyJoinError(e);
-      Log.e('SESSION', 'Errore join', e, st);
-      await _performLeaveCleanup(markPresenceInactive: true);
+      _lastJoinDebugError = DebugErrorService.instance.fromException(
+        area: 'SESSION_JOIN',
+        fallbackTitle: 'Ingresso evento non riuscito',
+        fallbackMessage: 'Non è stato possibile completare la scrittura della sessione evento.',
+        fallbackSuggestion: 'Controlla autenticazione, Firestore Rules, eventId e connessione internet.',
+        error: e,
+        stackTrace: st,
+        data: <String, Object?>{
+          'eventId': eventId,
+          'uid': uid,
+          'beaconKey': beaconKey,
+          'isInEventBeforeCleanup': _isInEvent,
+        },
+      );
+      _lastJoinError = _lastJoinDebugError!.title;
+
+      await leaveEvent();
       return false;
-    } finally {
-      _isJoining = false;
     }
   }
 
-  Future<void> _writeSessionDocuments({
+  Future<void> _writeBleMapping({
     required String eventId,
     required UserModel user,
-    required String sessionBleId,
+    required String beaconKey,
     required int major,
     required int minor,
   }) async {
-    final uid = user.uid;
-
-    final mappingData = <String, dynamic>{
-      ...user.toSummary(),
-      'sessionBleId': sessionBleId,
-      'beaconKey': sessionBleId,
-      'major': major,
-      'minor': minor,
-      'beaconUuid': AppConstants.proximeetBeaconUuid,
-      'joinedAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    };
-
-    final presenceData = <String, dynamic>{
-      'uid': uid,
-      'sessionBleId': sessionBleId,
-      'beaconKey': sessionBleId,
-      'major': major,
-      'minor': minor,
-      'beaconUuid': AppConstants.proximeetBeaconUuid,
-      'displayName': user.fullName,
-      'avatarURL': user.avatarURL,
-      'joinedAt': FieldValue.serverTimestamp(),
-      'lastSeen': FieldValue.serverTimestamp(),
-      'isActive': true,
-    };
-
-    final batch = _db.batch();
-
-    final mappingRef = _db
-        .collection('events')
-        .doc(eventId)
-        .collection('bleMapping')
-        .doc(sessionBleId);
-
-    final presenceRef = _db
-        .collection('events')
-        .doc(eventId)
-        .collection('presence')
-        .doc(uid);
-
-    batch.set(mappingRef, mappingData, SetOptions(merge: true));
-    batch.set(presenceRef, presenceData, SetOptions(merge: true));
-
-    await batch.commit();
+    try {
+      await _db
+          .collection('events')
+          .doc(eventId)
+          .collection('bleMapping')
+          .doc(beaconKey)
+          .set({
+        ...user.toSummary(),
+        'sessionBleId': beaconKey,
+        'beaconKey': beaconKey,
+        'major': major,
+        'minor': minor,
+        'beaconUuid': AppConstants.proximeetBeaconUuid,
+        'joinedAt': FieldValue.serverTimestamp(),
+      });
+    } catch (e, st) {
+      DebugErrorService.instance.fromException(
+        area: 'FIRESTORE_BLE_MAPPING',
+        fallbackTitle: 'Errore scrittura bleMapping',
+        fallbackMessage: 'Firestore non ha scritto il mapping beacon → utente.',
+        fallbackSuggestion: 'Controlla le rules su events/{eventId}/bleMapping/{beaconKey}.',
+        error: e,
+        stackTrace: st,
+        data: <String, Object?>{
+          'eventId': eventId,
+          'beaconKey': beaconKey,
+          'major': major,
+          'minor': minor,
+          'collection': 'events/$eventId/bleMapping/$beaconKey',
+        },
+      );
+      rethrow;
+    }
   }
 
-  Future<void> _startProximityBestEffort({
+  Future<void> _writePresence({
     required String eventId,
     required String uid,
-    required String sessionBleId,
+    required UserModel user,
+    required String beaconKey,
+    required int major,
+    required int minor,
   }) async {
     try {
-      final advOk = await BleAdvertiserService.instance.start(sessionBleId);
-      if (!advOk) {
-        Log.w(
-          'SESSION',
-          'Beacon non avviato. L ingresso evento continua comunque.',
-        );
-      }
+      await _db
+          .collection('events')
+          .doc(eventId)
+          .collection('presence')
+          .doc(uid)
+          .set({
+        'uid': uid,
+        'sessionBleId': beaconKey,
+        'beaconKey': beaconKey,
+        'major': major,
+        'minor': minor,
+        'displayName': user.fullName,
+        'avatarURL': user.avatarURL,
+        'joinedAt': FieldValue.serverTimestamp(),
+        'lastSeen': FieldValue.serverTimestamp(),
+        'isActive': true,
+      });
     } catch (e, st) {
-      Log.e('SESSION', 'Errore avvio beacon. Join non bloccato.', e, st);
-    }
-
-    try {
-      await BleScannerService.instance.start(mySessionBleId: sessionBleId);
-    } catch (e, st) {
-      Log.e('SESSION', 'Errore avvio scanner. Join non bloccato.', e, st);
-    }
-
-    try {
-      await NearbyDetectionService.instance.start(
-        eventId: eventId,
-        myUid: uid,
-        mySessionBleId: sessionBleId,
-        scanner: BleScannerService.instance,
+      DebugErrorService.instance.fromException(
+        area: 'FIRESTORE_PRESENCE',
+        fallbackTitle: 'Errore scrittura presenza',
+        fallbackMessage: 'Firestore non ha scritto la presenza dell’utente nell’evento.',
+        fallbackSuggestion: 'Controlla le rules su events/{eventId}/presence/{uid}.',
+        error: e,
+        stackTrace: st,
+        data: <String, Object?>{
+          'eventId': eventId,
+          'uid': uid,
+          'beaconKey': beaconKey,
+          'collection': 'events/$eventId/presence/$uid',
+        },
       );
-    } catch (e, st) {
-      Log.e('SESSION', 'Errore avvio detection. Join non bloccato.', e, st);
+      rethrow;
     }
   }
 
-  String _friendlyJoinError(Object e) {
-    final text = e.toString();
+  String _generateBeaconKey() {
+    final raw = const Uuid().v4().replaceAll('-', '');
+    final major = int.parse(raw.substring(0, 4), radix: 16);
+    final minor = int.parse(raw.substring(4, 8), radix: 16);
+    return AppConstants.beaconKey(major, minor);
+  }
 
-    if (text.contains('permission-denied')) {
-      return 'Permessi Firestore insufficienti per entrare in questo evento.';
-    }
-    if (text.contains('unavailable')) {
-      return 'Connessione non disponibile. Controlla internet e riprova.';
-    }
-    if (text.contains('not-found')) {
-      return 'Evento non trovato o non più disponibile.';
-    }
+  Future<void> _startBeaconBestEffort(String beaconKey) async {
+    try {
+      final advOk = await BleAdvertiserService.shared.start(beaconKey);
 
-    return 'Errore durante l ingresso all evento. Riprova.';
+      if (!advOk) {
+        DebugErrorService.instance.add(AppDebugError(
+          title: 'Beacon non avviato',
+          area: 'BEACON_START',
+          code: 'BEACON_START_FALSE',
+          message: 'Il plugin nativo ha restituito false durante l’avvio beacon.',
+          suggestion: 'Controlla permessi Bluetooth/Location e log nativi. Il join continua comunque.',
+          data: <String, Object?>{'beaconKey': beaconKey},
+        ));
+      }
+
+      await BleScannerService.shared.start(mySessionBleId: beaconKey);
+    } catch (e, st) {
+      DebugErrorService.instance.fromException(
+        area: 'BEACON_START',
+        fallbackTitle: 'Errore avvio beacon',
+        fallbackMessage: 'Il join evento è riuscito, ma iBeacon non è partito.',
+        fallbackSuggestion: 'Controlla Bluetooth, Localizzazione, AppDelegate.swift e PlatformBeaconService.',
+        error: e,
+        stackTrace: st,
+        data: <String, Object?>{'beaconKey': beaconKey},
+      );
+    }
+  }
+
+  Future<void> _startNearbyBestEffort({
+    required String eventId,
+    required String uid,
+    required String beaconKey,
+  }) async {
+    try {
+      await NearbyDetectionService.shared.start(
+        eventId: eventId,
+        myUid: uid,
+        mySessionBleId: beaconKey,
+        scanner: BleScannerService.shared,
+      );
+    } catch (e, st) {
+      DebugErrorService.instance.fromException(
+        area: 'NEARBY_START',
+        fallbackTitle: 'Errore avvio rilevamento vicini',
+        fallbackMessage: 'Il join evento è riuscito, ma NearbyDetectionService non è partito.',
+        fallbackSuggestion: 'Controlla stream scanner, bleMapping e log BEACON.',
+        error: e,
+        stackTrace: st,
+        data: <String, Object?>{
+          'eventId': eventId,
+          'uid': uid,
+          'beaconKey': beaconKey,
+        },
+      );
+    }
   }
 
   Future<void> leaveEvent() async {
-    if (_isLeaving) {
-      Log.w('SESSION', 'Leave ignorato: uscita già in corso');
-      return;
-    }
-
-    _isLeaving = true;
-
-    try {
-      await _performLeaveCleanup(markPresenceInactive: true);
-    } finally {
-      _isLeaving = false;
-    }
-  }
-
-  Future<void> _performLeaveCleanup({
-    required bool markPresenceInactive,
-  }) async {
     final eventId = _currentEventId;
     final sessionBleId = _sessionBleId;
     final uid = FirebaseAuth.instance.currentUser?.uid;
 
-    Log.d('SESSION', 'Cleanup evento=$eventId sessionBleId=$sessionBleId');
+    Log.d('SESSION', 'Leave evento $eventId');
+
+    PresenceHeartbeatService.shared.stop();
 
     try {
-      PresenceHeartbeatService.instance.stop();
+      await BleAdvertiserService.shared.stop();
+    } catch (e, st) {
+      DebugErrorService.instance.fromException(
+        area: 'BEACON_STOP',
+        fallbackTitle: 'Errore stop beacon',
+        fallbackMessage: 'Errore durante lo stop del beacon.',
+        fallbackSuggestion: 'Controlla PlatformBeaconService.stop().',
+        error: e,
+        stackTrace: st,
+      );
+    }
 
+    try {
+      await BleScannerService.shared.stop();
+    } catch (e, st) {
+      DebugErrorService.instance.fromException(
+        area: 'SCANNER_STOP',
+        fallbackTitle: 'Errore stop scanner',
+        fallbackMessage: 'Errore durante lo stop dello scanner.',
+        fallbackSuggestion: 'Controlla BleScannerService.stop().',
+        error: e,
+        stackTrace: st,
+      );
+    }
+
+    try {
+      NearbyDetectionService.shared.clear();
+    } catch (e, st) {
+      DebugErrorService.instance.fromException(
+        area: 'NEARBY_CLEAR',
+        fallbackTitle: 'Errore pulizia nearby',
+        fallbackMessage: 'Errore durante la pulizia dello stato nearby.',
+        fallbackSuggestion: 'Controlla NearbyDetectionService.clear().',
+        error: e,
+        stackTrace: st,
+      );
+    }
+
+    if (eventId != null && uid != null) {
       try {
-        await BleAdvertiserService.instance.stop();
+        await _db
+            .collection('events')
+            .doc(eventId)
+            .collection('presence')
+            .doc(uid)
+            .update({
+          'isActive': false,
+          'leftAt': FieldValue.serverTimestamp(),
+        });
       } catch (e, st) {
-        Log.e('SESSION', 'Errore stop advertiser', e, st);
+        DebugErrorService.instance.fromException(
+          area: 'FIRESTORE_LEAVE_PRESENCE',
+          fallbackTitle: 'Errore aggiornamento uscita evento',
+          fallbackMessage: 'Non è stato possibile segnare isActive=false.',
+          fallbackSuggestion: 'Controlla rules Firestore su presence/{uid}.',
+          error: e,
+          stackTrace: st,
+          data: <String, Object?>{'eventId': eventId, 'uid': uid},
+        );
       }
 
-      try {
-        await BleScannerService.instance.stop();
-      } catch (e, st) {
-        Log.e('SESSION', 'Errore stop scanner', e, st);
-      }
-
-      try {
-        NearbyDetectionService.instance.clear();
-      } catch (e, st) {
-        Log.e('SESSION', 'Errore clear nearby detection', e, st);
-      }
-
-      if (markPresenceInactive && eventId != null && uid != null) {
-        try {
-          await _db
-              .collection('events')
-              .doc(eventId)
-              .collection('presence')
-              .doc(uid)
-              .set({
-            'isActive': false,
-            'leftAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
-        } catch (e, st) {
-          Log.e('SESSION', 'Errore update presence on leave', e, st);
-        }
-      }
-
-      if (eventId != null && sessionBleId != null) {
+      if (sessionBleId != null) {
         try {
           await _db
               .collection('events')
@@ -285,45 +342,26 @@ class EventSessionService {
               .doc(sessionBleId)
               .delete();
         } catch (e, st) {
-          Log.e('SESSION', 'Errore delete bleMapping on leave', e, st);
+          DebugErrorService.instance.fromException(
+            area: 'FIRESTORE_LEAVE_BLE_MAPPING',
+            fallbackTitle: 'Errore cancellazione bleMapping',
+            fallbackMessage: 'Non è stato possibile rimuovere il mapping beacon.',
+            fallbackSuggestion: 'Controlla rules Firestore su bleMapping/{beaconKey}.',
+            error: e,
+            stackTrace: st,
+            data: <String, Object?>{
+              'eventId': eventId,
+              'beaconKey': sessionBleId,
+            },
+          );
         }
       }
-    } finally {
-      _currentEventId = null;
-      _sessionBleId = null;
-      _isInEvent = false;
-      Log.d('SESSION', 'Cleanup completato');
     }
-  }
 
-  Future<void> updateMyProfileInEvent(Map<String, dynamic> updates) async {
-    final eventId = _currentEventId;
-    final sessionBleId = _sessionBleId;
+    _currentEventId = null;
+    _sessionBleId = null;
+    _isInEvent = false;
 
-    if (eventId == null || sessionBleId == null) return;
-    if (updates.isEmpty) return;
-
-    final safeUpdates = Map<String, dynamic>.from(updates)
-      ..remove('email')
-      ..remove('phone')
-      ..remove('linkedin');
-
-    if (safeUpdates.isEmpty) return;
-
-    try {
-      await _db
-          .collection('events')
-          .doc(eventId)
-          .collection('bleMapping')
-          .doc(sessionBleId)
-          .update({
-        ...safeUpdates,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
-
-      Log.d('SESSION', 'Profilo aggiornato in evento: $safeUpdates');
-    } catch (e, st) {
-      Log.e('SESSION', 'Errore update profilo evento', e, st);
-    }
+    Log.d('SESSION', 'Leave completato');
   }
 }

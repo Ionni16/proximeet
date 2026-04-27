@@ -1,102 +1,130 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../core/logger.dart';
-
-/// Gestione centralizzata permessi Bluetooth/Location.
-///
-/// Per iBeacon su iOS serve Location When In Use/Always oltre al Bluetooth,
-/// perché il ranging passa da CoreLocation. Non blocchiamo l'utente se il
-/// bluetooth state non è immediatamente leggibile: il plugin nativo gestirà
-/// l'errore e il join evento continuerà comunque.
 class BlePermissionsService {
   BlePermissionsService._();
-  static final BlePermissionsService instance = BlePermissionsService._();
+
+  static final BlePermissionsService shared = BlePermissionsService._();
+
+  // Compatibilità con codice che usa .instance
+  static BlePermissionsService get instance => shared;
 
   Future<bool> isBluetoothOn() async {
+    if (kIsWeb) return false;
+
+    // Su iOS non blocchiamo mai l'ingresso evento su questo check.
+    // CoreBluetooth gestisce il permesso Bluetooth dal plugin nativo.
+    if (Platform.isIOS) return true;
+
     try {
       final state = await FlutterBluePlus.adapterState
           .first
-          .timeout(const Duration(seconds: 3));
+          .timeout(const Duration(seconds: 2));
       return state == BluetoothAdapterState.on;
-    } catch (e, st) {
-      Log.e('BLE-PERM', 'Impossibile leggere stato Bluetooth', e, st);
-      // Non bloccare l'app: su iOS lo stato può arrivare tardi.
-      return Platform.isIOS;
+    } catch (_) {
+      return false;
     }
   }
 
   Future<void> turnOnBluetooth() async {
-    if (Platform.isAndroid) {
-      try {
-        await FlutterBluePlus.turnOn();
-      } catch (e, st) {
-        Log.e('BLE-PERM', 'Errore turnOn', e, st);
-      }
+    if (!Platform.isAndroid) return;
+
+    try {
+      await FlutterBluePlus.turnOn();
+    } catch (e) {
+      debugPrint('[BLE-PERM] Errore turnOn Bluetooth: $e');
     }
   }
 
   Future<bool> requestAllPermissions() async {
-    if (Platform.isIOS) return _requestIOS();
-    return _requestAndroid();
-  }
+    if (kIsWeb) return false;
 
-  Future<bool> _requestAndroid() async {
-    final statuses = await <Permission>[
-      Permission.bluetoothScan,
-      Permission.bluetoothAdvertise,
-      Permission.bluetoothConnect,
-      Permission.locationWhenInUse,
-    ].request();
+    if (Platform.isIOS) {
+      return _requestIOS();
+    }
 
-    final allGranted = statuses.values.every(_isGrantedEnough);
-    Log.d('BLE-PERM', 'Android permessi: $statuses → $allGranted');
-    return allGranted;
+    if (Platform.isAndroid) {
+      return _requestAndroid();
+    }
+
+    return false;
   }
 
   Future<bool> _requestIOS() async {
-    final statuses = await <Permission>[
-      Permission.bluetooth,
-      Permission.locationWhenInUse,
-    ].request();
+    // iOS:
+    // - Non bloccare l'ingresso evento sul permesso Bluetooth.
+    // - Il prompt Bluetooth viene gestito da CoreBluetooth quando parte il plugin Swift.
+    // - Per iBeacon ranging serve Location.
+    try {
+      var locationStatus = await Permission.locationWhenInUse.status;
 
-    final bluetoothOk = _isGrantedEnough(
-      statuses[Permission.bluetooth] ?? await Permission.bluetooth.status,
-    );
-    final locationOk = _isGrantedEnough(
-      statuses[Permission.locationWhenInUse] ??
-          await Permission.locationWhenInUse.status,
-    );
+      if (locationStatus.isDenied || locationStatus.isRestricted) {
+        locationStatus = await Permission.locationWhenInUse.request();
+      }
 
-    Log.d(
-      'BLE-PERM',
-      'iOS permessi: bluetooth=$bluetoothOk location=$locationOk raw=$statuses',
-    );
+      if (locationStatus.isPermanentlyDenied) {
+        debugPrint('[BLE-PERM] iOS location permanentemente negata. Join consentito comunque.');
+      } else {
+        debugPrint('[BLE-PERM] iOS location status: $locationStatus');
+      }
 
-    return bluetoothOk && locationOk;
+      // Importante: ritorna sempre true su iOS.
+      // L'utente deve poter entrare nell'evento anche se iBeacon non parte.
+      return true;
+    } catch (e) {
+      debugPrint('[BLE-PERM] iOS errore richiesta permessi: $e');
+      return true;
+    }
+  }
+
+  Future<bool> _requestAndroid() async {
+    try {
+      final statuses = await <Permission>[
+        Permission.locationWhenInUse,
+        Permission.bluetoothScan,
+        Permission.bluetoothAdvertise,
+        Permission.bluetoothConnect,
+      ].request();
+
+      final locationOk =
+          statuses[Permission.locationWhenInUse]?.isGranted ?? false;
+      final scanOk = statuses[Permission.bluetoothScan]?.isGranted ?? false;
+      final advertiseOk =
+          statuses[Permission.bluetoothAdvertise]?.isGranted ?? false;
+      final connectOk =
+          statuses[Permission.bluetoothConnect]?.isGranted ?? false;
+
+      final ok = locationOk && scanOk && advertiseOk && connectOk;
+
+      debugPrint('[BLE-PERM] Android permissions: $statuses -> $ok');
+
+      return ok;
+    } catch (e) {
+      debugPrint('[BLE-PERM] Android errore richiesta permessi: $e');
+      return false;
+    }
   }
 
   Future<bool> arePermissionsGranted() async {
+    if (kIsWeb) return false;
+
     if (Platform.isIOS) {
-      final bluetoothOk = _isGrantedEnough(await Permission.bluetooth.status);
-      final locationOk =
-          _isGrantedEnough(await Permission.locationWhenInUse.status) ||
-              _isGrantedEnough(await Permission.locationAlways.status);
-      return bluetoothOk && locationOk;
+      // Non bloccare mai il flusso iOS su questo check.
+      return true;
     }
 
-    final scan = await Permission.bluetoothScan.isGranted;
-    final adv = await Permission.bluetoothAdvertise.isGranted;
-    final conn = await Permission.bluetoothConnect.isGranted;
-    final loc = await Permission.locationWhenInUse.isGranted;
-    return scan && adv && conn && loc;
-  }
+    if (Platform.isAndroid) {
+      final location = await Permission.locationWhenInUse.isGranted;
+      final scan = await Permission.bluetoothScan.isGranted;
+      final advertise = await Permission.bluetoothAdvertise.isGranted;
+      final connect = await Permission.bluetoothConnect.isGranted;
 
-  bool _isGrantedEnough(PermissionStatus status) {
-    return status == PermissionStatus.granted ||
-        status == PermissionStatus.limited ||
-        status == PermissionStatus.provisional;
+      return location && scan && advertise && connect;
+    }
+
+    return false;
   }
 }

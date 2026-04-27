@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
+import '../../core/app_debug_error.dart';
 import '../../models/event_model.dart';
 import '../../models/user_model.dart';
 import '../../services/firestore_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/ble_permissions_service.dart';
+import '../../services/debug_error_service.dart';
 import '../../services/event_session_service.dart';
+import '../../widgets/debug_error_sheet.dart';
 import '../home/home_screen.dart';
 
 class EventListScreen extends StatefulWidget {
@@ -36,11 +39,13 @@ class _EventListScreenState extends State<EventListScreen> {
 
   Future<void> _joinEvent(EventModel event) async {
     if (_currentUser == null || _joining) return;
+
+    DebugErrorService.instance.clear();
     setState(() => _joining = true);
 
     try {
-      // Bluetooth check
       final btOn = await BlePermissionsService.instance.isBluetoothOn();
+
       if (!btOn && mounted) {
         final confirm = await showDialog<bool>(
           context: context,
@@ -49,13 +54,13 @@ class _EventListScreenState extends State<EventListScreen> {
             icon: const Icon(Icons.bluetooth_disabled, size: 40),
             title: const Text('Bluetooth spento'),
             content: const Text(
-              'ProxiMeet ha bisogno del Bluetooth per rilevare '
-              'le persone vicine. Vuoi attivarlo?',
+              'ProxiMeet usa Bluetooth/iBeacon per rilevare le persone vicine. '
+              'Puoi entrare comunque, ma il rilevamento potrebbe non funzionare.',
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('Non ora'),
+                child: const Text('Entra comunque'),
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(ctx, true),
@@ -64,36 +69,46 @@ class _EventListScreenState extends State<EventListScreen> {
             ],
           ),
         );
+
         if (confirm == true) {
           await BlePermissionsService.instance.turnOnBluetooth();
           await Future.delayed(const Duration(seconds: 2));
-        } else {
-          setState(() => _joining = false);
-          return;
         }
       }
 
-      // Permessi
-      final granted =
-          await BlePermissionsService.instance.requestAllPermissions();
+      final granted = await BlePermissionsService.instance.requestAllPermissions();
+
       if (!granted && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Permessi Bluetooth negati'),
-            backgroundColor: Colors.red,
-          ),
+        final warning = DebugErrorService.instance.add(AppDebugError(
+          title: 'Permessi non completi',
+          area: 'PERMISSIONS',
+          code: 'PERMISSIONS_NOT_FULLY_GRANTED',
+          message:
+              'Bluetooth/posizione non sono completi. L’ingresso evento continua, ma il rilevamento nearby potrebbe non funzionare.',
+          suggestion:
+              'Apri Impostazioni app e abilita Bluetooth e Localizzazione. Su Android abilita anche Nearby devices.',
+        ));
+
+        _showWarningSnack(
+          'Permessi non completi. Puoi entrare comunque.',
+          error: warning,
         );
-        setState(() => _joining = false);
-        return;
       }
 
-      // Join
       final ok = await EventSessionService.instance.joinEvent(
         eventId: event.id,
         user: _currentUser!,
       );
 
       if (ok && mounted) {
+        final nonBlockingError = DebugErrorService.instance.latest;
+        if (nonBlockingError != null) {
+          _showWarningSnack(
+            'Evento aperto. Rilevamento nearby da verificare.',
+            error: nonBlockingError,
+          );
+        }
+
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -105,24 +120,57 @@ class _EventListScreenState extends State<EventListScreen> {
           ),
         );
       } else if (mounted) {
-        final error = EventSessionService.instance.lastJoinError ??
-            'Errore durante l\'ingresso all\'evento';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(error),
-            backgroundColor: Colors.red,
-          ),
-        );
+        final error = EventSessionService.instance.lastJoinDebugError ??
+            DebugErrorService.instance.latest ??
+            AppDebugError(
+              title: 'Ingresso evento non riuscito',
+              area: 'SESSION_JOIN',
+              code: 'JOIN_RETURNED_FALSE',
+              message:
+                  'EventSessionService.joinEvent ha restituito false senza dettagli aggiuntivi.',
+              suggestion:
+                  'Controlla console, autenticazione e scrittura Firestore presence/bleMapping.',
+            );
+
+        await showDebugErrorSheet(context, error);
       }
-    } catch (e) {
+    } catch (e, st) {
+      final error = DebugErrorService.instance.fromException(
+        area: 'EVENT_LIST_JOIN_BUTTON',
+        fallbackTitle: 'Errore ingresso evento',
+        fallbackMessage: 'Errore non gestito durante il tap su Entra.',
+        fallbackSuggestion:
+            'Copia i dettagli e controlla lo stack trace. Probabile problema UI, permessi o servizio sessione.',
+        error: e,
+        stackTrace: st,
+        data: <String, Object?>{
+          'eventId': event.id,
+          'eventName': event.name,
+          'currentUserUid': _currentUser?.uid,
+        },
+      );
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Errore: $e')),
-        );
+        await showDebugErrorSheet(context, error);
       }
     } finally {
       if (mounted) setState(() => _joining = false);
     }
+  }
+
+  void _showWarningSnack(String message, {required AppDebugError error}) {
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.orange,
+        action: SnackBarAction(
+          label: 'Dettagli',
+          onPressed: () => showDebugErrorSheet(context, error),
+        ),
+      ),
+    );
   }
 
   @override
