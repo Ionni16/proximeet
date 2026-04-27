@@ -27,8 +27,7 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>ProxiMeet accede alla galleria per impostare la tua foto profilo</string>
 
-	<!-- (OPZIONALE) Background BLE - per futuro supporto background -->
-	<!-- Decommenta se vuoi abilitare scanning in background -->
+
 	
 	<key>UIBackgroundModes</key>
 	<array>
