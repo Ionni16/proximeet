@@ -105,9 +105,11 @@ class _EventListScreenState extends State<EventListScreen> {
           ),
         );
       } else if (mounted) {
+        final error = EventSessionService.instance.lastJoinError ??
+            'Errore durante l\'ingresso all\'evento';
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Errore durante l\'ingresso all\'evento'),
+          SnackBar(
+            content: Text(error),
             backgroundColor: Colors.red,
           ),
         );

@@ -16,6 +16,9 @@
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi anche quando l’app non è in primo piano.</string>
 
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi.</string>
+
 	<!-- Camera per QR scanner -->
 	<key>NSCameraUsageDescription</key>
 	<string>ProxiMeet usa la fotocamera per scansionare i QR code dei contatti</string>

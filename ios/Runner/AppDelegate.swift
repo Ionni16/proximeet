@@ -10,7 +10,6 @@ import CoreLocation
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-
     GeneratedPluginRegistrant.register(with: self)
 
     guard let controller = window?.rootViewController as? FlutterViewController else {
@@ -18,7 +17,6 @@ import CoreLocation
     }
 
     ProxiMeetBeaconPlugin.register(with: controller.binaryMessenger)
-
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }
@@ -32,7 +30,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   private var rxRegion: CLBeaconRegion?
   private var eventSink: FlutterEventSink?
 
-  private var beaconUUID: UUID?
   private var major: CLBeaconMajorValue = 0
   private var minor: CLBeaconMinorValue = 0
 
@@ -60,8 +57,8 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
         else {
           result(FlutterError(
             code: "BAD_ARGS",
-            message: "uuid/major/minor mancanti",
-            details: nil
+            message: "uuid, major e minor sono obbligatori",
+            details: call.arguments
           ))
           return
         }
@@ -89,12 +86,12 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     withArguments arguments: Any?,
     eventSink events: @escaping FlutterEventSink
   ) -> FlutterError? {
-    self.eventSink = events
+    eventSink = events
     return nil
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
-    self.eventSink = nil
+    eventSink = nil
     return nil
   }
 
@@ -117,14 +114,13 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
       result(FlutterError(
         code: "BAD_MAJOR_MINOR",
         message: "major/minor devono essere 0...65535",
-        details: nil
+        details: ["major": major, "minor": minor]
       ))
       return
     }
 
     stop()
 
-    self.beaconUUID = uuid
     self.major = CLBeaconMajorValue(major)
     self.minor = CLBeaconMinorValue(minor)
 
@@ -132,43 +128,55 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     lm.delegate = self
     lm.pausesLocationUpdatesAutomatically = false
 
-    if Bundle.main.object(forInfoDictionaryKey: "NSLocationAlwaysAndWhenInUseUsageDescription") != nil {
-      lm.requestAlwaysAuthorization()
-    } else {
-      lm.requestWhenInUseAuthorization()
+    if Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") != nil {
+      lm.allowsBackgroundLocationUpdates = true
     }
 
-    self.locationManager = lm
+    locationManager = lm
 
-    let rx = CLBeaconRegion(
-      uuid: uuid,
-      identifier: regionIdentifier
-    )
-
+    let rx = CLBeaconRegion(uuid: uuid, identifier: regionIdentifier)
     rx.notifyOnEntry = true
     rx.notifyOnExit = true
     rx.notifyEntryStateOnDisplay = true
+    rxRegion = rx
 
-    self.rxRegion = rx
-
-    lm.startMonitoring(for: rx)
-
-    if #available(iOS 13.0, *) {
-      lm.startRangingBeacons(satisfying: rx.beaconIdentityConstraint)
-    } else {
-      lm.startRangingBeacons(in: rx)
-    }
-
-    self.txRegion = CLBeaconRegion(
+    txRegion = CLBeaconRegion(
       uuid: uuid,
       major: self.major,
       minor: self.minor,
       identifier: regionIdentifier + ".tx"
     )
 
-    self.peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
+    peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
 
+    let status: CLAuthorizationStatus
+    if #available(iOS 14.0, *) {
+      status = lm.authorizationStatus
+    } else {
+      status = CLLocationManager.authorizationStatus()
+    }
+
+    if status == .notDetermined {
+      // Foreground ranging funziona con When In Use. Always è utile solo per background.
+      lm.requestWhenInUseAuthorization()
+    } else {
+      handleAuthorizationStatus(status, manager: lm)
+    }
+
+    // Il join Dart non deve restare bloccato in attesa dei permessi.
     result(true)
+  }
+
+  private func startRangingIfPossible(manager: CLLocationManager) {
+    guard let rx = rxRegion else { return }
+
+    manager.startMonitoring(for: rx)
+
+    if #available(iOS 13.0, *) {
+      manager.startRangingBeacons(satisfying: rx.beaconIdentityConstraint)
+    } else {
+      manager.startRangingBeacons(in: rx)
+    }
   }
 
   private func startAdvertisingIfPossible() {
@@ -176,12 +184,9 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
       let pm = peripheralManager,
       pm.state == .poweredOn,
       let tx = txRegion
-    else {
-      return
-    }
+    else { return }
 
     pm.stopAdvertising()
-
     let data = tx.peripheralData(withMeasuredPower: nil) as NSDictionary
     pm.startAdvertising(data as? [String: Any])
 
@@ -197,16 +202,10 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
       startAdvertisingIfPossible()
 
     case .poweredOff:
-      eventSink?([
-        "type": "bluetoothOff",
-        "platform": "ios"
-      ])
+      eventSink?(["type": "bluetoothOff", "platform": "ios"])
 
     case .unauthorized:
-      eventSink?([
-        "type": "bluetoothUnauthorized",
-        "platform": "ios"
-      ])
+      eventSink?(["type": "bluetoothUnauthorized", "platform": "ios"])
 
     default:
       eventSink?([
@@ -233,8 +232,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     _ status: CLAuthorizationStatus,
     manager: CLLocationManager
   ) {
-    guard let rx = rxRegion else { return }
-
     eventSink?([
       "type": "locationAuthorization",
       "status": status.rawValue,
@@ -242,17 +239,9 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     ])
 
     if status == .authorizedAlways || status == .authorizedWhenInUse {
-      manager.startMonitoring(for: rx)
-
-      if #available(iOS 13.0, *) {
-        manager.startRangingBeacons(satisfying: rx.beaconIdentityConstraint)
-      } else {
-        manager.startRangingBeacons(in: rx)
-      }
+      startRangingIfPossible(manager: manager)
     }
   }
-
-
 
   func locationManager(
     _ manager: CLLocationManager,
@@ -275,7 +264,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
       let foundMajor = beacon.major.intValue
       let foundMinor = beacon.minor.intValue
 
-      if foundMajor == Int(self.major) && foundMinor == Int(self.minor) {
+      if foundMajor == Int(major) && foundMinor == Int(minor) {
         continue
       }
 
@@ -337,6 +326,5 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     locationManager = nil
     txRegion = nil
     rxRegion = nil
-    beaconUUID = nil
   }
 }
