@@ -241,15 +241,33 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   }
 
   private func startAdvertisingIfPossible() {
-    guard
-      let pm = peripheralManager,
-      pm.state == .poweredOn,
-      let tx = txRegion
-    else { return }
+    guard let pm = peripheralManager else { return }
+
+    // 1. Verifichiamo che il Bluetooth sia effettivamente autorizzato e acceso
+    if pm.state != .poweredOn {
+      print("❌ [iOS BEACON] Impossibile trasmettere: Bluetooth non pronto (Stato: \(pm.state.rawValue))")
+      return
+    }
+
+    guard let tx = txRegion else { return }
 
     pm.stopAdvertising()
-    let data = tx.peripheralData(withMeasuredPower: nil) as NSDictionary
-    pm.startAdvertising(data as? [String: Any])
+
+    // 2. Estrazione sicura a prova di crash del payload iBeacon
+    let beaconData = tx.peripheralData(withMeasuredPower: nil)
+    guard let data = beaconData as? [String: Any] else {
+      print("❌ [iOS BEACON] ERRORE FATALE: Impossibile generare il payload iBeacon!")
+      eventSink?([
+        "type": "advertiseError",
+        "message": "Cast del payload iBeacon fallito",
+        "platform": "ios"
+      ])
+      return
+    }
+
+    // 3. Avvio della trasmissione con i dati reali
+    pm.startAdvertising(data)
+    print("✅ [iOS BEACON] L'iPhone sta trasmettendo iBeacon correttamente!")
 
     eventSink?([
       "type": "advertiseStarted",
