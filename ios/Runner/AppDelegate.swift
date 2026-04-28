@@ -61,6 +61,10 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   // CoreLocation ranging può fermarsi silenziosamente su alcuni device.
   private var rangingRestartTimer: Timer?
 
+  private let androidServiceUuid = CBUUID(string: "ABCD")
+  private var advertisingPulseTimer: Timer?
+  private var advertiseIBeaconNext = true
+
   // ─────────────────────────────────────────────────────────────────────────
 
   static func register(with messenger: FlutterBinaryMessenger) {
@@ -243,9 +247,8 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   private func startAdvertisingIfPossible() {
     guard let pm = peripheralManager else { return }
 
-    // 1. Verifichiamo che il Bluetooth sia effettivamente autorizzato e acceso
     if pm.state != .poweredOn {
-      print("❌ [iOS BEACON] Impossibile trasmettere: Bluetooth non pronto (Stato: \(pm.state.rawValue))")
+      print("❌ [iOS BEACON] Bluetooth non pronto: \(pm.state.rawValue)")
       return
     }
 
@@ -253,32 +256,68 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
 
     pm.stopAdvertising()
 
-    // 2. Estrazione sicura a prova di crash del payload iBeacon
-    let beaconData = tx.peripheralData(withMeasuredPower: nil)
-    guard let data = beaconData as? [String: Any] else {
-      print("❌ [iOS BEACON] ERRORE FATALE: Impossibile generare il payload iBeacon!")
-      eventSink?([
-        "type": "advertiseError",
-        "message": "Cast del payload iBeacon fallito",
-        "platform": "ios"
+    let mode: String
+    let data: [String: Any]
+
+    if advertiseIBeaconNext {
+      // Formato iBeacon: rilevabile dagli iPhone.
+      let beaconData = tx.peripheralData(withMeasuredPower: nil)
+      guard let beaconDict = beaconData as? [String: Any] else {
+        eventSink?([
+          "type": "advertiseError",
+          "message": "Cast payload iBeacon fallito",
+          "platform": "ios"
+        ])
+        return
+      }
+
+      data = beaconDict
+      mode = "ibeacon"
+    } else {
+      // Formato Service Data: rilevabile dagli Android.
+      let payload = Data([
+        UInt8((Int(major) >> 8) & 0xFF),
+        UInt8(Int(major) & 0xFF),
+        UInt8((Int(minor) >> 8) & 0xFF),
+        UInt8(Int(minor) & 0xFF)
       ])
-      return
+
+      data = [
+        CBAdvertisementDataServiceDataKey: [
+          androidServiceUuid: payload
+        ]
+      ]
+
+      mode = "androidService"
     }
 
-    // 3. Avvio della trasmissione con i dati reali
+    advertiseIBeaconNext.toggle()
+
     pm.startAdvertising(data)
-    print("✅ [iOS BEACON] L'iPhone sta trasmettendo iBeacon correttamente!")
 
     eventSink?([
       "type": "advertiseStarted",
+      "mode": mode,
       "platform": "ios"
     ])
+  }
+
+  private func startAdvertisingPulseTimer() {
+    advertisingPulseTimer?.invalidate()
+
+    advertisingPulseTimer = Timer.scheduledTimer(
+      withTimeInterval: 1.5,
+      repeats: true
+    ) { [weak self] _ in
+      self?.startAdvertisingIfPossible()
+    }
   }
 
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
     switch peripheral.state {
     case .poweredOn:
       startAdvertisingIfPossible()
+      startAdvertisingPulseTimer()
 
     case .poweredOff:
       eventSink?(["type": "bluetoothOff", "platform": "ios"])
@@ -418,6 +457,10 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   private func stop() {
     rangingRestartTimer?.invalidate()
     rangingRestartTimer = nil
+
+    advertisingPulseTimer?.invalidate()
+    advertisingPulseTimer = nil
+    advertiseIBeaconNext = true
 
     peripheralManager?.stopAdvertising()
     peripheralManager = nil
