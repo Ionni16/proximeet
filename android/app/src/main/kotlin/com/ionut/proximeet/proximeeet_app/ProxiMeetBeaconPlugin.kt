@@ -147,8 +147,17 @@ class ProxiMeetBeaconPlugin(
         }
 
         if (!isLocationEnabled()) {
-            result.error("LOCATION_OFF", "Attiva la geolocalizzazione di sistema.", null)
-            return
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+                result.error("LOCATION_OFF", "Attiva la geolocalizzazione di sistema.", null)
+                return
+            }
+            emit(
+                mapOf(
+                    "type" to "locationOffWarning",
+                    "message" to "Geolocalizzazione disattivata: su Android 12+ provo comunque BLE scan/advertising.",
+                    "platform" to "android"
+                )
+            )
         }
 
         stop()
