@@ -1,3 +1,4 @@
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -51,7 +52,8 @@ class _EventListScreenState extends State<EventListScreen> {
           context: context,
           barrierDismissible: false,
           builder: (ctx) => AlertDialog(
-            icon: const Icon(Icons.bluetooth_disabled, size: 40),
+            icon: const Icon(Icons.bluetooth_disabled,
+                size: 40, color: Color(0xFF4D8EF7)),
             title: const Text('Bluetooth spento'),
             content: const Text(
               'ProxiMeet usa Bluetooth/iBeacon per rilevare le persone vicine. '
@@ -76,7 +78,8 @@ class _EventListScreenState extends State<EventListScreen> {
         }
       }
 
-      final granted = await BlePermissionsService.instance.requestAllPermissions();
+      final granted =
+          await BlePermissionsService.instance.requestAllPermissions();
 
       if (!granted && mounted) {
         final warning = DebugErrorService.instance.add(AppDebugError(
@@ -84,9 +87,9 @@ class _EventListScreenState extends State<EventListScreen> {
           area: 'PERMISSIONS',
           code: 'PERMISSIONS_NOT_FULLY_GRANTED',
           message:
-              'Bluetooth/posizione non sono completi. L’ingresso evento continua, ma il rilevamento nearby potrebbe non funzionare.',
+              'Bluetooth/posizione non sono completi. L\'ingresso evento continua, ma il rilevamento nearby potrebbe non funzionare.',
           suggestion:
-              'Apri Impostazioni app e abilita Bluetooth e Localizzazione. Su Android abilita anche Nearby devices.',
+              'Apri Impostazioni app e abilita Bluetooth e Localizzazione.',
         ));
 
         _showWarningSnack(
@@ -126,12 +129,9 @@ class _EventListScreenState extends State<EventListScreen> {
               title: 'Ingresso evento non riuscito',
               area: 'SESSION_JOIN',
               code: 'JOIN_RETURNED_FALSE',
-              message:
-                  'EventSessionService.joinEvent ha restituito false senza dettagli aggiuntivi.',
-              suggestion:
-                  'Controlla console, autenticazione e scrittura Firestore presence/bleMapping.',
+              message: 'EventSessionService.joinEvent ha restituito false.',
+              suggestion: 'Controlla console, autenticazione e Firestore.',
             );
-
         await showDebugErrorSheet(context, error);
       }
     } catch (e, st) {
@@ -139,8 +139,7 @@ class _EventListScreenState extends State<EventListScreen> {
         area: 'EVENT_LIST_JOIN_BUTTON',
         fallbackTitle: 'Errore ingresso evento',
         fallbackMessage: 'Errore non gestito durante il tap su Entra.',
-        fallbackSuggestion:
-            'Copia i dettagli e controlla lo stack trace. Probabile problema UI, permessi o servizio sessione.',
+        fallbackSuggestion: 'Controlla stack trace.',
         error: e,
         stackTrace: st,
         data: <String, Object?>{
@@ -149,10 +148,7 @@ class _EventListScreenState extends State<EventListScreen> {
           'currentUserUid': _currentUser?.uid,
         },
       );
-
-      if (mounted) {
-        await showDebugErrorSheet(context, error);
-      }
+      if (mounted) await showDebugErrorSheet(context, error);
     } finally {
       if (mounted) setState(() => _joining = false);
     }
@@ -160,13 +156,13 @@ class _EventListScreenState extends State<EventListScreen> {
 
   void _showWarningSnack(String message, {required AppDebugError error}) {
     if (!mounted) return;
-
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: Colors.orange,
+        backgroundColor: const Color(0xFFE65100),
         action: SnackBarAction(
           label: 'Dettagli',
+          textColor: Colors.white,
           onPressed: () => showDebugErrorSheet(context, error),
         ),
       ),
@@ -175,110 +171,234 @@ class _EventListScreenState extends State<EventListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            Icon(Icons.wifi_tethering,
-                color: theme.colorScheme.primary, size: 24),
-            const SizedBox(width: 8),
-            const Text('ProxiMeet',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Esci',
-            onPressed: () => AuthService.instance.logout(),
+      backgroundColor: const Color(0xFF050D1E),
+      body: Stack(
+        children: [
+          // Background glow subtile
+          Positioned(
+            top: -100,
+            left: -60,
+            child: Container(
+              width: 300,
+              height: 300,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: RadialGradient(
+                  colors: [
+                    const Color(0xFF1A56DB).withOpacity(0.12),
+                    Colors.transparent,
+                  ],
+                ),
+              ),
+            ),
           ),
-        ],
-      ),
-      body: _currentUser == null
-          ? const Center(child: CircularProgressIndicator())
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-                  child: Column(
+
+          SafeArea(
+            child: _currentUser == null
+                ? const Center(
+                    child: CircularProgressIndicator(
+                      color: Color(0xFF4D8EF7),
+                      strokeWidth: 2,
+                    ),
+                  )
+                : Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Ciao, ${_currentUser!.firstName}!',
-                        style: theme.textTheme.headlineSmall?.copyWith(
-                          fontWeight: FontWeight.bold,
+                      // ── Header ──
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                        child: Row(
+                          children: [
+                            // Logo
+                            Container(
+                              width: 38,
+                              height: 38,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: const Color(0xFF0D1B30),
+                                border: Border.all(
+                                  color: const Color(0xFF1A2D47),
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(0xFF1A56DB)
+                                        .withOpacity(0.2),
+                                    blurRadius: 12,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.wifi_tethering,
+                                size: 20,
+                                color: Color(0xFF4D8EF7),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            const Text(
+                              'ProxiMeet',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: -0.5,
+                                color: Color(0xFFE8F0FE),
+                              ),
+                            ),
+                            const Spacer(),
+                            // Logout
+                            IconButton(
+                              icon: const Icon(Icons.logout_outlined,
+                                  color: Color(0xFF4A6080), size: 20),
+                              tooltip: 'Esci',
+                              onPressed: () => AuthService.instance.logout(),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        'Seleziona un evento per iniziare',
-                        style: TextStyle(
-                          color: theme.colorScheme.onSurfaceVariant,
+
+                      const SizedBox(height: 28),
+
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Ciao, ${_currentUser!.firstName} 👋',
+                              style: const TextStyle(
+                                fontSize: 28,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: -0.5,
+                                color: Color(0xFFE8F0FE),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'Seleziona un evento per iniziare il networking',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Color(0xFF8BA3C7),
+                                height: 1.4,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 24),
+
+                      // Label sezione
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Row(
+                          children: [
+                            const Text(
+                              'EVENTI ATTIVI',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1.5,
+                                color: Color(0xFF4D8EF7),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Container(
+                                height: 1,
+                                color: const Color(0xFF1A2D47),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 14),
+
+                      // Lista eventi
+                      Expanded(
+                        child: StreamBuilder<List<EventModel>>(
+                          stream:
+                              FirestoreService.instance.listenToActiveEvents(),
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState ==
+                                ConnectionState.waiting) {
+                              return const Center(
+                                child: CircularProgressIndicator(
+                                  color: Color(0xFF4D8EF7),
+                                  strokeWidth: 2,
+                                ),
+                              );
+                            }
+
+                            final events = snapshot.data ?? [];
+
+                            if (events.isEmpty) {
+                              return Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Container(
+                                      width: 80,
+                                      height: 80,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: const Color(0xFF0D1B30),
+                                        border: Border.all(
+                                          color: const Color(0xFF1A2D47),
+                                        ),
+                                      ),
+                                      child: const Icon(
+                                        Icons.event_busy_outlined,
+                                        size: 36,
+                                        color: Color(0xFF4A6080),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 20),
+                                    const Text(
+                                      'Nessun evento attivo',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w600,
+                                        color: Color(0xFFE8F0FE),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    const Text(
+                                      'Gli eventi disponibili appariranno qui',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: Color(0xFF8BA3C7),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }
+
+                            return ListView.separated(
+                              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+                              itemCount: events.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(height: 14),
+                              itemBuilder: (context, i) => _EventCard(
+                                event: events[i],
+                                onJoin: () => _joinEvent(events[i]),
+                                isJoining: _joining,
+                              ),
+                            );
+                          },
                         ),
                       ),
                     ],
                   ),
-                ),
-                Expanded(
-                  child: StreamBuilder<List<EventModel>>(
-                    stream:
-                        FirestoreService.instance.listenToActiveEvents(),
-                    builder: (context, snapshot) {
-                      if (snapshot.connectionState ==
-                          ConnectionState.waiting) {
-                        return const Center(
-                            child: CircularProgressIndicator());
-                      }
-
-                      final events = snapshot.data ?? [];
-
-                      if (events.isEmpty) {
-                        return Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.event_busy_outlined,
-                                  size: 64,
-                                  color:
-                                      theme.colorScheme.onSurfaceVariant),
-                              const SizedBox(height: 16),
-                              Text('Nessun evento attivo',
-                                  style: theme.textTheme.titleMedium),
-                              const SizedBox(height: 8),
-                              Text(
-                                'Gli eventi disponibili appariranno qui',
-                                style: TextStyle(
-                                  color:
-                                      theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            ],
-                          ),
-                        );
-                      }
-
-                      return ListView.separated(
-                        padding: const EdgeInsets.all(16),
-                        itemCount: events.length,
-                        separatorBuilder: (_, __) =>
-                            const SizedBox(height: 12),
-                        itemBuilder: (context, i) => _EventCard(
-                          event: events[i],
-                          onJoin: () => _joinEvent(events[i]),
-                          isJoining: _joining,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
+          ),
+        ],
+      ),
     );
   }
 }
+
+// ── Event Card premium ───────────────────────────────────────
 
 class _EventCard extends StatelessWidget {
   final EventModel event;
@@ -293,121 +413,246 @@ class _EventCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return Container(
-      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(Icons.event,
-                    color: theme.colorScheme.primary),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(event.name,
-                        style: const TextStyle(
-                            fontWeight: FontWeight.bold, fontSize: 16)),
-                    const SizedBox(height: 2),
-                    Row(
-                      children: [
-                        Icon(Icons.location_on_outlined,
-                            size: 14,
-                            color:
-                                theme.colorScheme.onSurfaceVariant),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Text(event.location,
-                              style: TextStyle(
-                                  fontSize: 13,
-                                  color: theme.colorScheme
-                                      .onSurfaceVariant),
-                              overflow: TextOverflow.ellipsis),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          if (event.description.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Text(event.description,
-                style: TextStyle(
-                    fontSize: 13,
-                    color: theme.colorScheme.onSurfaceVariant),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis),
-          ],
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              StreamBuilder<int>(
-                stream: FirestoreService.instance
-                    .listenToActiveCount(event.id),
-                builder: (context, snap) {
-                  final count = snap.data ?? 0;
-                  return Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primaryContainer,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.people_outline,
-                            size: 14,
-                            color: theme.colorScheme.primary),
-                        const SizedBox(width: 4),
-                        Text('$count presenti',
-                            style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: theme.colorScheme.primary)),
-                      ],
-                    ),
-                  );
-                },
-              ),
-              const Spacer(),
-              FilledButton.icon(
-                icon: isJoining
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.login, size: 18),
-                label: Text(isJoining ? 'Ingresso...' : 'Entra'),
-                onPressed: isJoining ? null : onJoin,
-                style: FilledButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            ],
+        color: const Color(0xFF0D1B30),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: const Color(0xFF1A2D47),
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF1A56DB).withOpacity(0.06),
+            blurRadius: 24,
+            offset: const Offset(0, 8),
           ),
         ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header gradient strip
+            Container(
+              height: 4,
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Color(0xFF1A56DB), Color(0xFF4D8EF7)],
+                ),
+              ),
+            ),
+
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Icona evento
+                      Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF101E35),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0xFF1A2D47)),
+                        ),
+                        child: const Icon(
+                          Icons.event_outlined,
+                          color: Color(0xFF4D8EF7),
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              event.name,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFE8F0FE),
+                                letterSpacing: -0.2,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                const Icon(Icons.location_on_outlined,
+                                    size: 13, color: Color(0xFF8BA3C7)),
+                                const SizedBox(width: 3),
+                                Expanded(
+                                  child: Text(
+                                    event.location,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF8BA3C7),
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  if (event.description.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF080F1F),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF1A2D47)),
+                      ),
+                      child: Text(
+                        event.description,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF8BA3C7),
+                          height: 1.5,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 16),
+
+                  // Footer: partecipanti + CTA
+                  Row(
+                    children: [
+                      StreamBuilder<int>(
+                        stream: FirestoreService.instance
+                            .listenToActiveCount(event.id),
+                        builder: (context, snap) {
+                          final count = snap.data ?? 0;
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF101E35),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                  color: const Color(0xFF1A2D47)),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Color(0xFF4CAF50),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Color(0x804CAF50),
+                                        blurRadius: 6,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  '$count online',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF8BA3C7),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                      const Spacer(),
+
+                      // Gradient join button
+                      _JoinButton(
+                        onPressed: isJoining ? null : onJoin,
+                        isJoining: isJoining,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _JoinButton extends StatelessWidget {
+  final VoidCallback? onPressed;
+  final bool isJoining;
+
+  const _JoinButton({required this.onPressed, required this.isJoining});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          gradient: isJoining
+              ? null
+              : const LinearGradient(
+                  colors: [Color(0xFF1A56DB), Color(0xFF4D8EF7)],
+                ),
+          color: isJoining ? const Color(0xFF1A2D47) : null,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: isJoining
+              ? null
+              : [
+                  BoxShadow(
+                    color: const Color(0xFF1A56DB).withOpacity(0.4),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isJoining)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Color(0xFF4D8EF7),
+                ),
+              )
+            else
+              const Icon(Icons.arrow_forward, color: Colors.white, size: 16),
+            const SizedBox(width: 6),
+            Text(
+              isJoining ? 'Ingresso...' : 'Entra',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: isJoining ? const Color(0xFF8BA3C7) : Colors.white,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
