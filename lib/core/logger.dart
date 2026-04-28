@@ -1,21 +1,20 @@
 import 'dart:developer' as dev;
+import 'package:flutter/foundation.dart';
 
 /// Logger centralizzato.
 ///
-/// Usa `dart:developer` log() che:
-/// - appare nel DevTools
-/// - può essere filtrato per tag
-/// - in release mode ha overhead minimo
-///
-/// Uso: `Log.d('SESSION', 'Join completato');`
+/// Usa `debugPrint` per forzare la visibilità nel terminale standard
+/// e `dev.log` per mantenere la compatibilità col DevTools.
 abstract final class Log {
   /// Debug – informazioni di flusso.
   static void d(String tag, String message) {
+    debugPrint('[$tag] 🟦 $message');
     dev.log(message, name: tag, level: 500);
   }
 
   /// Warning – qualcosa di inaspettato ma gestito.
   static void w(String tag, String message) {
+    debugPrint('[$tag] ⚠️ $message');
     dev.log('⚠️ $message', name: tag, level: 900);
   }
 
@@ -26,6 +25,9 @@ abstract final class Log {
     Object? error,
     StackTrace? stackTrace,
   ]) {
+    debugPrint('[$tag] ❌ $message');
+    if (error != null) debugPrint('[$tag] Dettagli: $error');
+    
     dev.log(
       '❌ $message',
       name: tag,
