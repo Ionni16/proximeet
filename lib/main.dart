@@ -130,7 +130,7 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
           statusBarIconBrightness: Brightness.light,
         ),
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         color: bgCard,
         elevation: 0,
         shape: RoundedRectangleBorder(
@@ -223,7 +223,7 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
         contentTextStyle: TextStyle(color: textPrimary),
         behavior: SnackBarBehavior.floating,
       ),
-      dialogTheme: DialogTheme(
+      dialogTheme: DialogThemeData(
         backgroundColor: bgCard,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
