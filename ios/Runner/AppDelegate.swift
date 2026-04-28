@@ -12,11 +12,8 @@ import CoreLocation
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
 
-    // Il progetto usa UISceneDelegate: in questo caso `window` può essere nil
-    // durante didFinishLaunching e il vecchio codice non registrava mai
-    // MethodChannel/EventChannel. Risultato: MissingPluginException su iOS.
-    // Il registrar del FlutterAppDelegate fornisce un messenger valido senza
-    // dipendere dal rootViewController.
+    // Works with both classic AppDelegate-only projects and UISceneDelegate projects.
+    // Using the registrar avoids relying on window/rootViewController being available here.
     if let registrar = self.registrar(forPlugin: "ProxiMeetBeaconPlugin") {
       ProxiMeetBeaconPlugin.register(with: registrar.messenger())
     }
@@ -24,12 +21,14 @@ import CoreLocation
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
-  // Riavvia il ranging quando l'app torna in foreground.
-  // Necessario perché CoreLocation ferma il ranging dopo alcuni minuti
-  // in background e non lo riprende automaticamente al rientro.
   override func applicationDidBecomeActive(_ application: UIApplication) {
     super.applicationDidBecomeActive(application)
-    ProxiMeetBeaconPlugin.shared.resumeRanging()
+    ProxiMeetBeaconPlugin.shared.resume()
+  }
+
+  override func applicationWillTerminate(_ application: UIApplication) {
+    ProxiMeetBeaconPlugin.shared.stop()
+    super.applicationWillTerminate(application)
   }
 }
 
@@ -42,30 +41,21 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
   private var rxRegion: CLBeaconRegion?
   private var eventSink: FlutterEventSink?
 
-  private var major: CLBeaconMajorValue = 0
-  private var minor: CLBeaconMinorValue = 0
+  private var ownMajor: CLBeaconMajorValue = 0
+  private var ownMinor: CLBeaconMinorValue = 0
+  private var currentUuid: UUID?
+  private var isStarted = false
 
   private let regionIdentifier = "com.ionut.proximeet.proximeeet_app.ibeacon"
 
-  // ── EWMA RSSI smoothing ───────────────────────────────────────────────────
-  // Chiave: "major_minor", valore: RSSI smoothed.
-  // alpha=0.25 → 75% peso al precedente, 25% al nuovo packet.
   private var rssiSmoothed: [String: Double] = [:]
-  private let ewmaAlpha: Double = 0.25
-
-  // Rate-limit emit per non inondare Flutter con ogni ranging tick (1Hz su iOS).
   private var lastEmitAt: [String: TimeInterval] = [:]
+  private let ewmaAlpha: Double = 0.25
   private let minEmitInterval: TimeInterval = 0.8
+  private let minValidRssi = -100
 
-  // Timer per riavviare il ranging ogni 30 secondi.
-  // CoreLocation ranging può fermarsi silenziosamente su alcuni device.
   private var rangingRestartTimer: Timer?
-
-  private let androidServiceUuid = CBUUID(string: "ABCD")
-  private var advertisingPulseTimer: Timer?
-  private var advertiseIBeaconNext = true
-
-  // ─────────────────────────────────────────────────────────────────────────
+  private var stateReportTimer: Timer?
 
   static func register(with messenger: FlutterBinaryMessenger) {
     let methodChannel = FlutterMethodChannel(
@@ -134,11 +124,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     result: @escaping FlutterResult
   ) {
     guard let uuid = UUID(uuidString: uuidString) else {
-      result(FlutterError(
-        code: "BAD_UUID",
-        message: "UUID iBeacon non valido",
-        details: uuidString
-      ))
+      result(FlutterError(code: "BAD_UUID", message: "UUID iBeacon non valido", details: uuidString))
       return
     }
 
@@ -151,24 +137,34 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
       return
     }
 
-    stop()
+    guard CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) else {
+      result(FlutterError(
+        code: "BEACON_UNSUPPORTED",
+        message: "Questo dispositivo non supporta il monitoring iBeacon.",
+        details: nil
+      ))
+      return
+    }
 
-    self.major = CLBeaconMajorValue(major)
-    self.minor = CLBeaconMinorValue(minor)
+    stopInternal(keepEventSink: true)
+
+    isStarted = true
+    currentUuid = uuid
+    ownMajor = CLBeaconMajorValue(major)
+    ownMinor = CLBeaconMinorValue(minor)
     rssiSmoothed.removeAll()
     lastEmitAt.removeAll()
 
-    let lm = CLLocationManager()
-    lm.delegate = self
-    lm.pausesLocationUpdatesAutomatically = false
+    let manager = CLLocationManager()
+    manager.delegate = self
+    manager.pausesLocationUpdatesAutomatically = false
+    manager.distanceFilter = kCLDistanceFilterNone
 
-    // FIX: allowsBackgroundLocationUpdates deve essere sempre true
-    // (non condizionale su UIBackgroundModes), così il ranging continua
-    // quando l'app va in background (richiede "Always" authorization).
-    lm.allowsBackgroundLocationUpdates = true
-    lm.showsBackgroundLocationIndicator = false
-
-    locationManager = lm
+    // This improves behavior when the app has Always authorization and the proper Info.plist modes.
+    // It does not bypass iOS background throttling.
+    manager.allowsBackgroundLocationUpdates = true
+    manager.showsBackgroundLocationIndicator = false
+    locationManager = manager
 
     let rx = CLBeaconRegion(uuid: uuid, identifier: regionIdentifier)
     rx.notifyOnEntry = true
@@ -178,157 +174,188 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
 
     txRegion = CLBeaconRegion(
       uuid: uuid,
-      major: self.major,
-      minor: self.minor,
+      major: ownMajor,
+      minor: ownMinor,
       identifier: regionIdentifier + ".tx"
     )
 
     peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
 
-    // FIX: richiedere "Always" invece di "WhenInUse".
-    // Con "WhenInUse" il ranging si ferma appena l'app va in background,
-    // causando il bug asimmetrico: chi è in background non vede nessuno.
-    // Con "Always" il ranging continua anche in background.
-    // Info.plist deve avere NSLocationAlwaysAndWhenInUseUsageDescription.
-    let status: CLAuthorizationStatus
-    if #available(iOS 14.0, *) {
-      status = lm.authorizationStatus
-    } else {
-      status = CLLocationManager.authorizationStatus()
+    let status = authorizationStatus(for: manager)
+    switch status {
+    case .notDetermined:
+      manager.requestAlwaysAuthorization()
+    case .authorizedWhenInUse:
+      manager.requestAlwaysAuthorization()
+      startMonitoringAndRangingIfPossible(manager: manager)
+    case .authorizedAlways:
+      startMonitoringAndRangingIfPossible(manager: manager)
+    case .restricted, .denied:
+      emit(["type": "locationAuthorization", "status": status.rawValue, "platform": "ios"])
+    @unknown default:
+      emit(["type": "locationAuthorization", "status": status.rawValue, "platform": "ios"])
     }
 
-    if status == .notDetermined {
-      lm.requestAlwaysAuthorization()
-    } else {
-      handleAuthorizationStatus(status, manager: lm)
-    }
+    startMaintenanceTimers()
 
-    // Avvia il timer di restart ranging: ogni 30 secondi verifica
-    // e riavvia il ranging se è fermo (protezione contro lo stop silenzioso
-    // di CoreLocation che si verifica su alcuni device iOS).
-    startRangingRestartTimer()
-
-    // Il join Dart non deve restare bloccato in attesa dei permessi.
+    // Native startup is asynchronous on iOS because authorization and Bluetooth state callbacks
+    // arrive later. Concrete failures are emitted on the event channel.
     result(true)
   }
 
-  // Avvia (o riavvia) il timer che mantiene il ranging attivo.
-  private func startRangingRestartTimer() {
+  func resume() {
+    guard isStarted, let manager = locationManager else { return }
+    startMonitoringAndRangingIfPossible(manager: manager)
+    startAdvertisingIfPossible()
+    startMaintenanceTimers()
+  }
+
+  func stop() {
+    stopInternal(keepEventSink: true)
+  }
+
+  private func stopInternal(keepEventSink: Bool) {
     rangingRestartTimer?.invalidate()
-    rangingRestartTimer = Timer.scheduledTimer(
-      withTimeInterval: 30.0,
-      repeats: true
-    ) { [weak self] _ in
-      guard let self = self, let lm = self.locationManager else { return }
-      self.startRangingIfPossible(manager: lm)
+    rangingRestartTimer = nil
+    stateReportTimer?.invalidate()
+    stateReportTimer = nil
+
+    peripheralManager?.stopAdvertising()
+    peripheralManager = nil
+
+    if let manager = locationManager {
+      if let rx = rxRegion {
+        if #available(iOS 13.0, *) {
+          manager.stopRangingBeacons(satisfying: rx.beaconIdentityConstraint)
+        } else {
+          manager.stopRangingBeacons(in: rx)
+        }
+        manager.stopMonitoring(for: rx)
+      }
+
+      for region in manager.monitoredRegions where region.identifier == regionIdentifier || region.identifier == regionIdentifier + ".tx" {
+        manager.stopMonitoring(for: region)
+      }
+    }
+
+    locationManager = nil
+    txRegion = nil
+    rxRegion = nil
+    currentUuid = nil
+    isStarted = false
+    rssiSmoothed.removeAll()
+    lastEmitAt.removeAll()
+
+    if !keepEventSink {
+      eventSink = nil
     }
   }
 
-  // Chiamato da AppDelegate.applicationDidBecomeActive.
-  func resumeRanging() {
-    guard let lm = locationManager else { return }
-    startRangingIfPossible(manager: lm)
-    startRangingRestartTimer()
+  private func authorizationStatus(for manager: CLLocationManager) -> CLAuthorizationStatus {
+    if #available(iOS 14.0, *) {
+      return manager.authorizationStatus
+    }
+    return CLLocationManager.authorizationStatus()
   }
 
-  private func startRangingIfPossible(manager: CLLocationManager) {
-    guard let rx = rxRegion else { return }
+  private func startMaintenanceTimers() {
+    rangingRestartTimer?.invalidate()
+    rangingRestartTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+      guard let self = self, let manager = self.locationManager, self.isStarted else { return }
+      self.startMonitoringAndRangingIfPossible(manager: manager)
+    }
 
-    // Avvia sempre il monitoring (necessario per background entry events).
+    stateReportTimer?.invalidate()
+    stateReportTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+      guard let self = self, self.isStarted else { return }
+      self.emit([
+        "type": "stateWatchdog",
+        "bluetoothState": self.peripheralManager?.state.rawValue ?? -1,
+        "locationStatus": self.locationManager.map { self.authorizationStatus(for: $0).rawValue } ?? -1,
+        "platform": "ios"
+      ])
+    }
+  }
+
+  private func startMonitoringAndRangingIfPossible(manager: CLLocationManager) {
+    guard isStarted, let rx = rxRegion else { return }
+
+    let status = authorizationStatus(for: manager)
+    guard status == .authorizedAlways || status == .authorizedWhenInUse else {
+      emit(["type": "locationAuthorization", "status": status.rawValue, "platform": "ios"])
+      return
+    }
+
     manager.startMonitoring(for: rx)
+    manager.requestState(for: rx)
 
     if #available(iOS 13.0, *) {
       manager.startRangingBeacons(satisfying: rx.beaconIdentityConstraint)
     } else {
       manager.startRangingBeacons(in: rx)
     }
+
+    emit(["type": "scanStarted", "mode": "ibeacon_ranging", "platform": "ios"])
   }
 
   private func startAdvertisingIfPossible() {
-    guard let pm = peripheralManager else { return }
+    guard isStarted, let peripheralManager = peripheralManager else { return }
 
-    if pm.state != .poweredOn {
-      print("❌ [iOS BEACON] Bluetooth non pronto: \(pm.state.rawValue)")
+    guard peripheralManager.state == .poweredOn else {
+      emit([
+        "type": "bluetoothState",
+        "state": peripheralManager.state.rawValue,
+        "platform": "ios"
+      ])
       return
     }
 
-    guard let tx = txRegion else { return }
+    guard let txRegion = txRegion else { return }
 
-    pm.stopAdvertising()
-
-    let mode: String
-    let data: [String: Any]
-
-    if advertiseIBeaconNext {
-      // Formato iBeacon: rilevabile dagli iPhone.
-      let beaconData = tx.peripheralData(withMeasuredPower: nil)
-      guard let beaconDict = beaconData as? [String: Any] else {
-        eventSink?([
-          "type": "advertiseError",
-          "message": "Cast payload iBeacon fallito",
-          "platform": "ios"
-        ])
-        return
-      }
-
-      data = beaconDict
-      mode = "ibeacon"
-    } else {
-      // Formato Service Data: rilevabile dagli Android.
-      let payload = Data([
-        UInt8((Int(major) >> 8) & 0xFF),
-        UInt8(Int(major) & 0xFF),
-        UInt8((Int(minor) >> 8) & 0xFF),
-        UInt8(Int(minor) & 0xFF)
+    let beaconData = txRegion.peripheralData(withMeasuredPower: nil)
+    guard let payload = beaconData as? [String: Any] else {
+      emit([
+        "type": "advertiseError",
+        "message": "Cast payload iBeacon fallito",
+        "platform": "ios"
       ])
-
-      data = [
-        CBAdvertisementDataServiceDataKey: [
-          androidServiceUuid: payload
-        ]
-      ]
-
-      mode = "androidService"
+      return
     }
 
-    advertiseIBeaconNext.toggle()
-
-    pm.startAdvertising(data)
-
-    eventSink?([
-      "type": "advertiseStarted",
-      "mode": mode,
-      "platform": "ios"
-    ])
-  }
-
-  private func startAdvertisingPulseTimer() {
-    advertisingPulseTimer?.invalidate()
-
-    advertisingPulseTimer = Timer.scheduledTimer(
-      withTimeInterval: 1.5,
-      repeats: true
-    ) { [weak self] _ in
-      self?.startAdvertisingIfPossible()
-    }
+    peripheralManager.stopAdvertising()
+    peripheralManager.startAdvertising(payload)
   }
 
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
     switch peripheral.state {
     case .poweredOn:
+      emit(["type": "bluetoothOn", "platform": "ios"])
       startAdvertisingIfPossible()
-      startAdvertisingPulseTimer()
-
     case .poweredOff:
-      eventSink?(["type": "bluetoothOff", "platform": "ios"])
-
+      emit(["type": "bluetoothOff", "platform": "ios"])
     case .unauthorized:
-      eventSink?(["type": "bluetoothUnauthorized", "platform": "ios"])
-
+      emit(["type": "bluetoothUnauthorized", "platform": "ios"])
+    case .unsupported:
+      emit(["type": "bluetoothUnsupported", "platform": "ios"])
     default:
-      eventSink?([
-        "type": "bluetoothState",
-        "state": peripheral.state.rawValue,
+      emit(["type": "bluetoothState", "state": peripheral.state.rawValue, "platform": "ios"])
+    }
+  }
+
+  func peripheralManager(
+    _ peripheral: CBPeripheralManager,
+    didStartAdvertising error: Error?
+  ) {
+    if let error = error {
+      emit([
+        "type": "advertiseError",
+        "message": error.localizedDescription,
+        "platform": "ios"
+      ])
+    } else {
+      emit([
+        "type": "advertiseStarted",
+        "mode": "ibeacon",
         "platform": "ios"
       ])
     }
@@ -336,7 +363,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
 
   @available(iOS 14.0, *)
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-    handleAuthorizationStatus(manager.authorizationStatus, manager: manager)
+    handleAuthorizationStatus(authorizationStatus(for: manager), manager: manager)
   }
 
   func locationManager(
@@ -346,30 +373,66 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     handleAuthorizationStatus(status, manager: manager)
   }
 
-  private func handleAuthorizationStatus(
-    _ status: CLAuthorizationStatus,
-    manager: CLLocationManager
-  ) {
-    eventSink?([
-      "type": "locationAuthorization",
-      "status": status.rawValue,
-      "platform": "ios"
-    ])
+  private func handleAuthorizationStatus(_ status: CLAuthorizationStatus, manager: CLLocationManager) {
+    emit(["type": "locationAuthorization", "status": status.rawValue, "platform": "ios"])
 
-    if status == .authorizedWhenInUse {
-      // Upgrade corretto: permission_handler chiede WhenInUse; il plugin nativo
-      // deve poi richiedere Always per mantenere beacon/ranging in background.
+    switch status {
+    case .authorizedAlways:
+      startMonitoringAndRangingIfPossible(manager: manager)
+    case .authorizedWhenInUse:
       manager.requestAlwaysAuthorization()
-      startRangingIfPossible(manager: manager)
-      return
-    }
-
-    if status == .authorizedAlways {
-      startRangingIfPossible(manager: manager)
+      startMonitoringAndRangingIfPossible(manager: manager)
+    case .denied, .restricted:
+      emit([
+        "type": "locationError",
+        "code": "LOCATION_DENIED",
+        "message": "Autorizzazione localizzazione negata o limitata.",
+        "platform": "ios"
+      ])
+    case .notDetermined:
+      manager.requestAlwaysAuthorization()
+    @unknown default:
+      break
     }
   }
 
-  // Chiamato una volta al secondo da CoreLocation (in foreground).
+  func locationManager(
+    _ manager: CLLocationManager,
+    didDetermineState state: CLRegionState,
+    for region: CLRegion
+  ) {
+    emit([
+      "type": "regionState",
+      "state": state.rawValue,
+      "identifier": region.identifier,
+      "platform": "ios"
+    ])
+  }
+
+  func locationManager(
+    _ manager: CLLocationManager,
+    monitoringDidFailFor region: CLRegion?,
+    withError error: Error
+  ) {
+    emit([
+      "type": "monitoringError",
+      "identifier": region?.identifier ?? "unknown",
+      "message": error.localizedDescription,
+      "platform": "ios"
+    ])
+  }
+
+  func locationManager(
+    _ manager: CLLocationManager,
+    didFailWithError error: Error
+  ) {
+    emit([
+      "type": "locationError",
+      "message": error.localizedDescription,
+      "platform": "ios"
+    ])
+  }
+
   func locationManager(
     _ manager: CLLocationManager,
     didRange beacons: [CLBeacon],
@@ -378,7 +441,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     handleRangedBeacons(beacons)
   }
 
-  // Fallback per iOS < 13.
   func locationManager(
     _ manager: CLLocationManager,
     didRangeBeacons beacons: [CLBeacon],
@@ -391,100 +453,56 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler, CLLocationMan
     let now = Date().timeIntervalSince1970
 
     for beacon in beacons {
-      // Filtra RSSI invalidi: 0 = non disponibile, < -100 = rumore.
-      guard beacon.rssi != 0 && beacon.rssi > -100 else { continue }
+      guard beacon.rssi != 0 && beacon.rssi > minValidRssi else { continue }
 
       let foundMajor = beacon.major.intValue
       let foundMinor = beacon.minor.intValue
 
-      // Non segnalare sé stessi.
-      if foundMajor == Int(major) && foundMinor == Int(minor) { continue }
+      if foundMajor == Int(ownMajor) && foundMinor == Int(ownMinor) { continue }
 
       let key = "\(foundMajor)_\(foundMinor)"
-
-      // ── EWMA smoothing ────────────────────────────────────────────────────
       let rawRssi = Double(beacon.rssi)
-      let prev = rssiSmoothed[key]
       let smoothed: Double
-      if let p = prev {
-        smoothed = ewmaAlpha * rawRssi + (1.0 - ewmaAlpha) * p
+
+      if let previous = rssiSmoothed[key] {
+        smoothed = ewmaAlpha * rawRssi + (1.0 - ewmaAlpha) * previous
       } else {
         smoothed = rawRssi
       }
-      rssiSmoothed[key] = smoothed
-      // ──────────────────────────────────────────────────────────────────────
 
-      // Rate-limit: CoreLocation chiama didRange ogni ~1 secondo.
-      // Con beacon multipli, limitiamo comunque a MIN_EMIT_INTERVAL per coerenza.
+      rssiSmoothed[key] = smoothed
+
       let last = lastEmitAt[key] ?? 0.0
       if now - last < minEmitInterval { continue }
       lastEmitAt[key] = now
 
-      eventSink?([
+      emit([
         "type": "beacon",
         "major": foundMajor,
         "minor": foundMinor,
         "rssi": Int(smoothed),
+        "source": "ibeacon",
         "platform": "ios"
       ])
     }
+
+    purgeOldRssiState(now: now)
   }
 
-  func locationManager(
-    _ manager: CLLocationManager,
-    didFailWithError error: Error
-  ) {
-    eventSink?([
-      "type": "locationError",
-      "message": error.localizedDescription,
-      "platform": "ios"
-    ])
-  }
+  private func purgeOldRssiState(now: TimeInterval) {
+    let staleKeys = lastEmitAt
+      .filter { now - $0.value > 60.0 }
+      .map { $0.key }
 
-  func peripheralManager(
-    _ peripheral: CBPeripheralManager,
-    didStartAdvertising error: Error?
-  ) {
-    if let error {
-      eventSink?([
-        "type": "advertiseError",
-        "message": error.localizedDescription,
-        "platform": "ios"
-      ])
+    for key in staleKeys {
+      lastEmitAt.removeValue(forKey: key)
+      rssiSmoothed.removeValue(forKey: key)
     }
   }
 
-  private func stop() {
-    rangingRestartTimer?.invalidate()
-    rangingRestartTimer = nil
-
-    advertisingPulseTimer?.invalidate()
-    advertisingPulseTimer = nil
-    advertiseIBeaconNext = true
-
-    peripheralManager?.stopAdvertising()
-    peripheralManager = nil
-
-    if let lm = locationManager {
-      for region in lm.monitoredRegions {
-        if region.identifier == regionIdentifier || region.identifier == regionIdentifier + ".tx" {
-          lm.stopMonitoring(for: region)
-        }
-      }
-
-      if let rx = rxRegion {
-        if #available(iOS 13.0, *) {
-          lm.stopRangingBeacons(satisfying: rx.beaconIdentityConstraint)
-        } else {
-          lm.stopRangingBeacons(in: rx)
-        }
-      }
+  private func emit(_ payload: [String: Any]) {
+    DispatchQueue.main.async { [weak self] in
+      self?.eventSink?(payload)
     }
-
-    locationManager = nil
-    txRegion = nil
-    rxRegion = nil
-    rssiSmoothed.removeAll()
-    lastEmitAt.removeAll()
   }
 }
