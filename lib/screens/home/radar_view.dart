@@ -5,10 +5,7 @@ import '../../models/user_model.dart';
 import '../../models/nearby_user.dart';
 import '../../widgets/user_avatar.dart';
 
-/// Vista radar stile navigazione/aviazione.
-///
-/// Sweep rotante con scia luminosa, dot che si accendono
-/// al passaggio della linea e sfumano gradualmente.
+/// Vista radar con tema electric blue (in linea con il logo ProxiMeet).
 class RadarView extends StatefulWidget {
   final UserModel currentUser;
   final List<NearbyUser> nearbyUsers;
@@ -34,7 +31,7 @@ class _RadarViewState extends State<RadarView>
     super.initState();
     _ctrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2800),
+      duration: const Duration(milliseconds: 3200),
     )..repeat();
   }
 
@@ -46,11 +43,9 @@ class _RadarViewState extends State<RadarView>
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    // Verde radar classico
-    final radarColor = HSLColor.fromAHSL(1, 150, 0.85, 0.45).toColor();
-    final radarColorDim = radarColor.withOpacity(0.12);
-    final isDark = theme.brightness == Brightness.dark;
+    // Palette electric blue — coerente col logo
+    const radarColor = Color(0xFF4D8EF7);
+    const radarColorDim = Color(0x1A4D8EF7);
 
     return Column(
       children: [
@@ -76,14 +71,13 @@ class _RadarViewState extends State<RadarView>
                       return Stack(
                         alignment: Alignment.center,
                         children: [
-                          // ── Background + griglia + sweep ──
+                          // Background + griglia + sweep
                           CustomPaint(
                             size: Size(size, size),
                             painter: _RadarPainter(
                               sweepAngle: sweepAngle,
                               radarColor: radarColor,
                               ringColor: radarColorDim,
-                              isDark: isDark,
                               userPositions: _computePositions(
                                 widget.nearbyUsers,
                                 center,
@@ -91,7 +85,7 @@ class _RadarViewState extends State<RadarView>
                             ),
                           ),
 
-                          // ── Dot utenti ──
+                          // Dot utenti
                           ...widget.nearbyUsers.asMap().entries.map((entry) {
                             final i = entry.key;
                             final nearby = entry.value;
@@ -100,15 +94,11 @@ class _RadarViewState extends State<RadarView>
                               pos.dy - center,
                               pos.dx - center,
                             );
-
-                            // Calcola opacità: piena quando il sweep è appena passato,
-                            // sfuma nel tempo fino al prossimo passaggio
                             final angleDiff = _normalizeAngle(
                               sweepAngle - dotAngle,
                             );
-                            // angleDiff va da 0 (appena passato) a 2π (sta per passare)
-                            final opacity = (1.0 - (angleDiff / (2 * pi)))
-                                .clamp(0.15, 1.0);
+                            final opacity =
+                                (1.0 - (angleDiff / (2 * pi))).clamp(0.15, 1.0);
 
                             return Positioned(
                               left: pos.dx - 22,
@@ -127,34 +117,38 @@ class _RadarViewState extends State<RadarView>
                             );
                           }),
 
-                          // ── Avatar centrale ──
+                          // Avatar centrale
                           Container(
-                            width: 56,
-                            height: 56,
+                            width: 60,
+                            height: 60,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: isDark
-                                  ? Colors.black87
-                                  : Colors.white,
+                              color: const Color(0xFF050D1E),
                               border: Border.all(
                                 color: radarColor,
                                 width: 2,
                               ),
                               boxShadow: [
                                 BoxShadow(
-                                  color: radarColor.withOpacity(0.4),
-                                  blurRadius: 12,
+                                  color: radarColor.withOpacity(0.5),
+                                  blurRadius: 16,
                                   spreadRadius: 2,
+                                ),
+                                BoxShadow(
+                                  color: radarColor.withOpacity(0.15),
+                                  blurRadius: 40,
+                                  spreadRadius: 10,
                                 ),
                               ],
                             ),
                             child: Center(
                               child: Text(
                                 widget.currentUser.firstName[0].toUpperCase(),
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontSize: 22,
-                                  fontWeight: FontWeight.bold,
+                                  fontWeight: FontWeight.w700,
                                   color: radarColor,
+                                  letterSpacing: 0,
                                 ),
                               ),
                             ),
@@ -169,11 +163,11 @@ class _RadarViewState extends State<RadarView>
           ),
         ),
 
-        // ── Strip orizzontale dei rilevati ──
+        // ── Strip orizzontale rilevati ──
         if (widget.nearbyUsers.isNotEmpty)
           Container(
-            height: 105,
-            padding: const EdgeInsets.only(left: 16, bottom: 8),
+            height: 110,
+            padding: const EdgeInsets.only(left: 16, right: 8, bottom: 8),
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: widget.nearbyUsers.length,
@@ -183,11 +177,21 @@ class _RadarViewState extends State<RadarView>
                 return GestureDetector(
                   onTap: () => widget.onUserTap(nearby),
                   child: Container(
-                    width: 84,
-                    padding: const EdgeInsets.all(8),
+                    width: 88,
+                    padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(14),
+                      color: const Color(0xFF0D1B30),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: const Color(0xFF1A2D47),
+                        width: 1,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF1A56DB).withOpacity(0.08),
+                          blurRadius: 12,
+                        ),
+                      ],
                     ),
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -197,20 +201,21 @@ class _RadarViewState extends State<RadarView>
                           name: nearby.displayName,
                           size: 38,
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 5),
                         Text(
                           nearby.firstName,
                           style: const TextStyle(
                             fontSize: 11,
                             fontWeight: FontWeight.w600,
+                            color: Color(0xFFE8F0FE),
                           ),
                           overflow: TextOverflow.ellipsis,
                         ),
                         Text(
                           nearby.distanceLabel,
-                          style: TextStyle(
+                          style: const TextStyle(
                             fontSize: 10,
-                            color: theme.colorScheme.onSurfaceVariant,
+                            color: Color(0xFF4D8EF7),
                           ),
                         ),
                       ],
@@ -224,9 +229,8 @@ class _RadarViewState extends State<RadarView>
     );
   }
 
-  /// Posizione di un dot sul radar basata su RSSI e golden angle.
   Offset _dotPosition(int index, NearbyUser nearby, double center) {
-    final angle = index * 2.399963; // golden angle
+    final angle = index * 2.399963;
     final radius = nearby.radarRadius * center * 0.82;
     return Offset(
       center + radius * cos(angle),
@@ -248,21 +252,19 @@ class _RadarViewState extends State<RadarView>
 }
 
 // ═══════════════════════════════════════════════════════════
-// RADAR PAINTER — cerchi, croce, sweep con scia
+// RADAR PAINTER — electric blue theme
 // ═══════════════════════════════════════════════════════════
 
 class _RadarPainter extends CustomPainter {
   final double sweepAngle;
   final Color radarColor;
   final Color ringColor;
-  final bool isDark;
   final List<Offset> userPositions;
 
   _RadarPainter({
     required this.sweepAngle,
     required this.radarColor,
     required this.ringColor,
-    required this.isDark,
     required this.userPositions,
   });
 
@@ -271,58 +273,48 @@ class _RadarPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final maxR = size.width / 2;
 
-    // ── Sfondo circolare scuro ──
-    canvas.drawCircle(
-      center,
-      maxR,
-      Paint()..color = (isDark ? const Color(0xFF0A1A14) : const Color(0xFF0D2818)).withOpacity(0.95),
-    );
+    // ── Sfondo — deep navy, coerente col tema app ──
+    final bgPaint = Paint()
+      ..shader = RadialGradient(
+        colors: [
+          const Color(0xFF0A1628),
+          const Color(0xFF050D1E),
+        ],
+        stops: const [0.0, 1.0],
+      ).createShader(Rect.fromCircle(center: center, radius: maxR));
+    canvas.drawCircle(center, maxR, bgPaint);
 
     // ── Cerchi concentrici ──
     final ringPaint = Paint()
-      ..color = ringColor
+      ..color = radarColor.withOpacity(0.08)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.5;
+      ..strokeWidth = 0.8;
 
     for (final frac in [0.25, 0.50, 0.75, 1.0]) {
       canvas.drawCircle(center, maxR * frac, ringPaint);
     }
 
-    // ── Croce ──
-    final crossPaint = Paint()
-      ..color = radarColor.withOpacity(0.08)
-      ..strokeWidth = 0.5;
-
-    canvas.drawLine(
-      Offset(center.dx - maxR, center.dy),
-      Offset(center.dx + maxR, center.dy),
-      crossPaint,
-    );
-    canvas.drawLine(
-      Offset(center.dx, center.dy - maxR),
-      Offset(center.dx, center.dy + maxR),
-      crossPaint,
-    );
+    // ── Assi ──
+    final axisPaint = Paint()
+      ..color = radarColor.withOpacity(0.06)
+      ..strokeWidth = 0.6;
+    canvas.drawLine(Offset(center.dx - maxR, center.dy),
+        Offset(center.dx + maxR, center.dy), axisPaint);
+    canvas.drawLine(Offset(center.dx, center.dy - maxR),
+        Offset(center.dx, center.dy + maxR), axisPaint);
 
     // ── Diagonali ──
     final diagPaint = Paint()
-      ..color = radarColor.withOpacity(0.04)
-      ..strokeWidth = 0.5;
-    final d = maxR * 0.707; // cos(45°)
-    canvas.drawLine(
-      Offset(center.dx - d, center.dy - d),
-      Offset(center.dx + d, center.dy + d),
-      diagPaint,
-    );
-    canvas.drawLine(
-      Offset(center.dx + d, center.dy - d),
-      Offset(center.dx - d, center.dy + d),
-      diagPaint,
-    );
+      ..color = radarColor.withOpacity(0.03)
+      ..strokeWidth = 0.6;
+    final d = maxR * 0.707;
+    canvas.drawLine(Offset(center.dx - d, center.dy - d),
+        Offset(center.dx + d, center.dy + d), diagPaint);
+    canvas.drawLine(Offset(center.dx + d, center.dy - d),
+        Offset(center.dx - d, center.dy + d), diagPaint);
 
-    // ── Sweep arc (scia del radar) ──
-    // Disegniamo un arco conico con gradiente da trasparente → verde
-    const sweepWidth = 1.1; // radianti (~63°)
+    // ── Sweep arc con gradiente electric blue ──
+    const sweepWidth = 1.1;
     final sweepRect = Rect.fromCircle(center: center, radius: maxR);
 
     final sweepPaint = Paint()
@@ -331,26 +323,20 @@ class _RadarPainter extends CustomPainter {
         endAngle: sweepAngle,
         colors: [
           radarColor.withOpacity(0.0),
-          radarColor.withOpacity(0.05),
-          radarColor.withOpacity(0.15),
-          radarColor.withOpacity(0.35),
+          radarColor.withOpacity(0.04),
+          radarColor.withOpacity(0.12),
+          radarColor.withOpacity(0.30),
         ],
         stops: const [0.0, 0.3, 0.7, 1.0],
         transform: GradientRotation(sweepAngle - sweepWidth),
       ).createShader(sweepRect)
       ..style = PaintingStyle.fill;
 
-    canvas.drawArc(
-      sweepRect,
-      sweepAngle - sweepWidth,
-      sweepWidth,
-      true,
-      sweepPaint,
-    );
+    canvas.drawArc(sweepRect, sweepAngle - sweepWidth, sweepWidth, true, sweepPaint);
 
-    // ── Linea di scansione (bordo principale del sweep) ──
+    // ── Linea scanner ──
     final linePaint = Paint()
-      ..color = radarColor.withOpacity(0.8)
+      ..color = radarColor.withOpacity(0.9)
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
@@ -361,51 +347,46 @@ class _RadarPainter extends CustomPainter {
     );
     canvas.drawLine(center, lineEnd, linePaint);
 
-    // ── Glow lungo la linea di scansione ──
+    // ── Glow linea scanner ──
     final glowPaint = Paint()
-      ..color = radarColor.withOpacity(0.15)
-      ..strokeWidth = 6
+      ..color = radarColor.withOpacity(0.18)
+      ..strokeWidth = 8
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
-
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
     canvas.drawLine(center, lineEnd, glowPaint);
 
-    // ── Blip glow quando il sweep passa su un utente ──
+    // ── Blip glow sui rilevati ──
     for (final pos in userPositions) {
       final dotAngle = atan2(pos.dy - center.dy, pos.dx - center.dx);
       var angleDiff = (sweepAngle - dotAngle) % (2 * pi);
       if (angleDiff < 0) angleDiff += 2 * pi;
 
-      // Se il sweep è appena passato (entro 0.5 rad ≈ 30°), disegna un blip glow
       if (angleDiff < 0.5) {
         final intensity = 1.0 - (angleDiff / 0.5);
         final blipPaint = Paint()
-          ..color = radarColor.withOpacity(0.6 * intensity)
-          ..maskFilter = MaskFilter.blur(BlurStyle.normal, 8 * intensity + 2);
-
-        canvas.drawCircle(pos, 10 + 6 * intensity, blipPaint);
+          ..color = radarColor.withOpacity(0.65 * intensity)
+          ..maskFilter = MaskFilter.blur(BlurStyle.normal, 10 * intensity + 2);
+        canvas.drawCircle(pos, 12 + 6 * intensity, blipPaint);
       }
     }
 
     // ── Centro glow ──
     final centerGlow = Paint()
-      ..color = radarColor.withOpacity(0.2)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
-    canvas.drawCircle(center, 12, centerGlow);
+      ..color = radarColor.withOpacity(0.25)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+    canvas.drawCircle(center, 14, centerGlow);
 
     // ── Etichette distanza ──
-    final textPainter = TextPainter(
-      textDirection: TextDirection.ltr,
-    );
-    final labels = ['25m', '50m', '75m', '100m'];
-    final fracs = [0.25, 0.50, 0.75, 1.0];
+    final textPainter = TextPainter(textDirection: TextDirection.ltr);
+    final labels = ['25m', '50m', '75m'];
+    final fracs = [0.25, 0.50, 0.75];
 
     for (var i = 0; i < labels.length; i++) {
       textPainter.text = TextSpan(
         text: labels[i],
         style: TextStyle(
-          color: radarColor.withOpacity(0.3),
+          color: radarColor.withOpacity(0.25),
           fontSize: 9,
           fontFamily: 'monospace',
         ),
@@ -413,10 +394,7 @@ class _RadarPainter extends CustomPainter {
       textPainter.layout();
       textPainter.paint(
         canvas,
-        Offset(
-          center.dx + 4,
-          center.dy - maxR * fracs[i] - 12,
-        ),
+        Offset(center.dx + 4, center.dy - maxR * fracs[i] - 12),
       );
     }
   }
@@ -426,7 +404,7 @@ class _RadarPainter extends CustomPainter {
 }
 
 // ═══════════════════════════════════════════════════════════
-// RADAR BLIP — dot utente con glow verde
+// RADAR BLIP — dot utente electric blue
 // ═══════════════════════════════════════════════════════════
 
 class _RadarBlip extends StatelessWidget {
@@ -447,16 +425,16 @@ class _RadarBlip extends StatelessWidget {
       height: 44,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: radarColor.withOpacity(0.15 + 0.2 * intensity),
+        color: radarColor.withOpacity(0.12 + 0.18 * intensity),
         border: Border.all(
-          color: radarColor.withOpacity(0.5 + 0.5 * intensity),
+          color: radarColor.withOpacity(0.4 + 0.6 * intensity),
           width: 1.5,
         ),
-        boxShadow: intensity > 0.5
+        boxShadow: intensity > 0.4
             ? [
                 BoxShadow(
-                  color: radarColor.withOpacity(0.3 * intensity),
-                  blurRadius: 8,
+                  color: radarColor.withOpacity(0.35 * intensity),
+                  blurRadius: 10,
                   spreadRadius: 1,
                 ),
               ]
@@ -467,7 +445,7 @@ class _RadarBlip extends StatelessWidget {
           nearby.firstName[0].toUpperCase(),
           style: TextStyle(
             fontSize: 16,
-            fontWeight: FontWeight.bold,
+            fontWeight: FontWeight.w700,
             color: radarColor.withOpacity(0.6 + 0.4 * intensity),
           ),
         ),

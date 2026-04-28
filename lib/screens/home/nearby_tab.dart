@@ -148,21 +148,7 @@ class _EmptyState extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0.8, end: 1.2),
-            duration: const Duration(seconds: 2),
-            curve: Curves.easeInOut,
-            builder: (context, scale, child) => Transform.scale(
-              scale: scale,
-              child: child,
-            ),
-            onEnd: () {},
-            child: Icon(
-              Icons.sensors,
-              size: 56,
-              color: theme.colorScheme.primary.withOpacity(0.5),
-            ),
-          ),
+          _PulseIcon(color: theme.colorScheme.primary),
           const SizedBox(height: 16),
           Text(
             'Scansione in corso...',
@@ -181,6 +167,52 @@ class _EmptyState extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Icona con animazione pulse continua (non usa TweenAnimationBuilder
+/// perché richiederebbe un StatefulWidget esterno per il reverse loop).
+class _PulseIcon extends StatefulWidget {
+  final Color color;
+  const _PulseIcon({required this.color});
+
+  @override
+  State<_PulseIcon> createState() => _PulseIconState();
+}
+
+class _PulseIconState extends State<_PulseIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat(reverse: true);
+    _scale = Tween<double>(begin: 0.85, end: 1.15).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ScaleTransition(
+      scale: _scale,
+      child: Icon(
+        Icons.sensors,
+        size: 56,
+        color: widget.color.withOpacity(0.5),
       ),
     );
   }

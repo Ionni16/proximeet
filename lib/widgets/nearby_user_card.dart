@@ -4,206 +4,276 @@ import '../models/nearby_user.dart';
 import '../services/firestore_service.dart';
 import 'user_avatar.dart';
 
-/// Bottom sheet dettagliato per un utente rilevato via BLE.
-///
-/// Mostra: avatar, nome, ruolo, azienda, bio, distanza BLE,
-/// contatti (email, telefono, LinkedIn) e bottone "Scambia biglietto".
+/// Bottom sheet premium per un utente rilevato via BLE.
 class NearbyUserCard {
   NearbyUserCard._();
 
   static void show(BuildContext context, NearbyUser nearby) {
-    final theme = Theme.of(context);
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (ctx) => DraggableScrollableSheet(
-        initialChildSize: 0.55,
-        minChildSize: 0.35,
-        maxChildSize: 0.85,
-        expand: false,
-        builder: (_, controller) => SingleChildScrollView(
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _NearbyUserSheet(nearby: nearby),
+    );
+  }
+}
+
+class _NearbyUserSheet extends StatelessWidget {
+  final NearbyUser nearby;
+  const _NearbyUserSheet({required this.nearby});
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.58,
+      minChildSize: 0.35,
+      maxChildSize: 0.88,
+      expand: false,
+      builder: (_, controller) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF0D1B30),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+          border: Border(
+            top: BorderSide(color: Color(0xFF1A2D47), width: 1),
+            left: BorderSide(color: Color(0xFF1A2D47), width: 1),
+            right: BorderSide(color: Color(0xFF1A2D47), width: 1),
+          ),
+        ),
+        child: SingleChildScrollView(
           controller: controller,
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               // Handle
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.outlineVariant,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 20),
-
-              // Avatar grande
-              UserAvatar(
-                imageUrl: nearby.avatarURL,
-                name: nearby.displayName,
-                size: 80,
-                borderColor: theme.colorScheme.primary,
-                borderWidth: 2.5,
-              ),
-              const SizedBox(height: 14),
-
-              // Nome
-              Text(
-                nearby.displayName,
-                style: theme.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 4),
-
-              // Ruolo · Azienda
-              Text(
-                '${nearby.role} · ${nearby.company}',
-                style: TextStyle(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontSize: 14,
-                ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 12),
-
-              // Chip distanza + RSSI + tempo
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                alignment: WrapAlignment.center,
-                children: [
-                  _Chip(
-                    icon: Icons.sensors,
-                    label: nearby.distanceLabel,
-                    color: _distanceColor(nearby.rssi, theme),
-                    theme: theme,
-                  ),
-                  _Chip(
-                    icon: Icons.signal_cellular_alt,
-                    label: '${nearby.rssi} dBm',
-                    color: theme.colorScheme.surfaceContainerHighest,
-                    theme: theme,
-                  ),
-                  _Chip(
-                    icon: Icons.access_time,
-                    label: nearby.lastSeenLabel,
-                    color: theme.colorScheme.surfaceContainerHighest,
-                    theme: theme,
-                  ),
-                ],
-              ),
-
-              // Bio
-              if (nearby.bio.isNotEmpty) ...[
-                const SizedBox(height: 16),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(14),
+              Padding(
+                padding: const EdgeInsets.only(top: 12, bottom: 0),
+                child: Container(
+                  width: 40,
+                  height: 4,
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(12),
+                    color: const Color(0xFF2A3F5F),
+                    borderRadius: BorderRadius.circular(2),
                   ),
-                  child: Text(
-                    nearby.bio,
-                    style: TextStyle(
-                      fontSize: 13,
-                      height: 1.5,
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              ],
-
-              // Contatti preview
-              if (nearby.hasSocials) ...[
-                const SizedBox(height: 16),
-                if (nearby.email.isNotEmpty)
-                  _ContactRow(
-                    icon: Icons.email_outlined,
-                    value: nearby.email,
-                    theme: theme,
-                  ),
-                if (nearby.phone.isNotEmpty)
-                  _ContactRow(
-                    icon: Icons.phone_outlined,
-                    value: nearby.phone,
-                    theme: theme,
-                  ),
-                if (nearby.linkedin.isNotEmpty)
-                  _ContactRow(
-                    icon: Icons.link_outlined,
-                    value: nearby.linkedin,
-                    theme: theme,
-                  ),
-              ],
-
-              const SizedBox(height: 24),
-
-              // Bottone scambia biglietto
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: _SendRequestButton(
-                  targetUid: nearby.uid,
-                  targetName: nearby.firstName,
                 ),
               ),
-              const SizedBox(height: 16),
+
+              // ── Header con gradient ──
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+                child: Column(
+                  children: [
+                    // Avatar con glow
+                    Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        // Glow ring
+                        Container(
+                          width: 100,
+                          height: 100,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF1A56DB).withOpacity(0.25),
+                                blurRadius: 30,
+                                spreadRadius: 5,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              colors: [
+                                const Color(0xFF1A56DB),
+                                const Color(0xFF4D8EF7),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                          ),
+                          child: Container(
+                            padding: const EdgeInsets.all(2),
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Color(0xFF0D1B30),
+                            ),
+                            child: UserAvatar(
+                              imageUrl: nearby.avatarURL,
+                              name: nearby.displayName,
+                              size: 80,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 14),
+
+                    Text(
+                      nearby.displayName,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: -0.4,
+                        color: Color(0xFFE8F0FE),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${nearby.role} · ${nearby.company}',
+                      style: const TextStyle(
+                        color: Color(0xFF8BA3C7),
+                        fontSize: 14,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+
+                    const SizedBox(height: 14),
+
+                    // Chips distanza/RSSI/tempo
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        _DistanceChip(nearby: nearby),
+                        _InfoChip(
+                          icon: Icons.signal_cellular_alt,
+                          label: '${nearby.rssi} dBm',
+                        ),
+                        _InfoChip(
+                          icon: Icons.access_time,
+                          label: nearby.lastSeenLabel,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              // Divider
+              const Divider(height: 1, color: Color(0xFF1A2D47)),
+
+              // ── Body ──
+              Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Bio
+                    if (nearby.bio.isNotEmpty) ...[
+                      const _SectionLabel('BIO'),
+                      const SizedBox(height: 8),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF080F1F),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0xFF1A2D47)),
+                        ),
+                        child: Text(
+                          nearby.bio,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            height: 1.6,
+                            color: Color(0xFF8BA3C7),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+
+                    // Contatti
+                    if (nearby.hasSocials) ...[
+                      const _SectionLabel('CONTATTI'),
+                      const SizedBox(height: 8),
+                      if (nearby.email.isNotEmpty)
+                        _ContactRow(
+                          icon: Icons.alternate_email,
+                          label: 'Email',
+                          value: nearby.email,
+                        ),
+                      if (nearby.phone.isNotEmpty)
+                        _ContactRow(
+                          icon: Icons.phone_outlined,
+                          label: 'Telefono',
+                          value: nearby.phone,
+                        ),
+                      if (nearby.linkedin.isNotEmpty)
+                        _ContactRow(
+                          icon: Icons.link_outlined,
+                          label: 'LinkedIn',
+                          value: nearby.linkedin,
+                        ),
+                      const SizedBox(height: 20),
+                    ],
+
+                    // CTA
+                    _SendRequestButton(
+                      targetUid: nearby.uid,
+                      targetName: nearby.firstName,
+                    ),
+
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
       ),
     );
   }
-
-  static Color _distanceColor(int rssi, ThemeData theme) {
-    if (rssi >= -50) return theme.colorScheme.primaryContainer;
-    if (rssi >= -65) return theme.colorScheme.secondaryContainer;
-    if (rssi >= -80) return theme.colorScheme.tertiaryContainer;
-    return theme.colorScheme.surfaceContainerHighest;
-  }
 }
 
-// ── Componenti interni ──────────────────────────────────────
+// ── Chip distanza colorata ────────────────────────────────────
 
-class _Chip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color color;
-  final ThemeData theme;
-
-  const _Chip({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.theme,
-  });
+class _DistanceChip extends StatelessWidget {
+  final NearbyUser nearby;
+  const _DistanceChip({required this.nearby});
 
   @override
   Widget build(BuildContext context) {
+    Color chipColor;
+    Color textColor;
+
+    if (nearby.rssi >= -55) {
+      chipColor = const Color(0xFF0D2D18);
+      textColor = const Color(0xFF4CAF50);
+    } else if (nearby.rssi >= -68) {
+      chipColor = const Color(0xFF1A2D10);
+      textColor = const Color(0xFF8BC34A);
+    } else if (nearby.rssi >= -80) {
+      chipColor = const Color(0xFF1A2800);
+      textColor = const Color(0xFFFFC107);
+    } else {
+      chipColor = const Color(0xFF1A1A2D);
+      textColor = const Color(0xFF8BA3C7);
+    }
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: color,
+        color: chipColor,
         borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: textColor.withOpacity(0.3)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 14, color: theme.colorScheme.onSurfaceVariant),
+          Icon(Icons.sensors, size: 13, color: textColor),
           const SizedBox(width: 5),
           Text(
-            label,
+            nearby.distanceLabel,
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: theme.colorScheme.onSurfaceVariant,
+              color: textColor,
             ),
           ),
         ],
@@ -212,15 +282,67 @@ class _Chip extends StatelessWidget {
   }
 }
 
+class _InfoChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+
+  const _InfoChip({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFF101E35),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF1A2D47)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: const Color(0xFF8BA3C7)),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFF8BA3C7),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String text;
+  const _SectionLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 1.5,
+        color: Color(0xFF4D8EF7),
+      ),
+    );
+  }
+}
+
 class _ContactRow extends StatelessWidget {
   final IconData icon;
+  final String label;
   final String value;
-  final ThemeData theme;
 
   const _ContactRow({
     required this.icon,
+    required this.label,
     required this.value,
-    required this.theme,
   });
 
   @override
@@ -228,7 +350,7 @@ class _ContactRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: InkWell(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
         onLongPress: () {
           Clipboard.setData(ClipboardData(text: value));
           ScaffoldMessenger.of(context).showSnackBar(
@@ -239,27 +361,52 @@ class _ContactRow extends StatelessWidget {
           );
         },
         child: Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(10),
+            color: const Color(0xFF080F1F),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF1A2D47)),
           ),
           child: Row(
             children: [
-              Icon(icon, color: theme.colorScheme.primary, size: 18),
-              const SizedBox(width: 10),
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A3560),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: const Color(0xFF4D8EF7), size: 17),
+              ),
+              const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  value,
-                  style: const TextStyle(fontSize: 13),
-                  overflow: TextOverflow.ellipsis,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.5,
+                        color: Color(0xFF4A6080),
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      value,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFFE8F0FE),
+                        fontWeight: FontWeight.w500,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
                 ),
               ),
-              Icon(
-                Icons.copy,
-                size: 14,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              const Icon(Icons.copy_outlined,
+                  size: 14, color: Color(0xFF4A6080)),
             ],
           ),
         ),
@@ -268,7 +415,7 @@ class _ContactRow extends StatelessWidget {
   }
 }
 
-/// Bottone "Scambia biglietto" con stato e gestione errori.
+/// Bottone "Scambia biglietto" con gradient
 class _SendRequestButton extends StatefulWidget {
   final String targetUid;
   final String targetName;
@@ -294,7 +441,7 @@ class _SendRequestButtonState extends State<_SendRequestButton> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Richiesta inviata a ${widget.targetName}!'),
-            backgroundColor: Theme.of(context).colorScheme.primary,
+            backgroundColor: const Color(0xFF1A3560),
           ),
         );
       }
@@ -303,7 +450,7 @@ class _SendRequestButtonState extends State<_SendRequestButton> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(e.toString().replaceAll('Exception: ', '')),
-            backgroundColor: Theme.of(context).colorScheme.error,
+            backgroundColor: const Color(0xFF4A1010),
           ),
         );
       }
@@ -314,21 +461,56 @@ class _SendRequestButtonState extends State<_SendRequestButton> {
 
   @override
   Widget build(BuildContext context) {
-    return FilledButton.icon(
-      icon: _loading
-          ? const SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Colors.white,
+    return GestureDetector(
+      onTap: _loading ? null : _send,
+      child: Container(
+        width: double.infinity,
+        height: 54,
+        decoration: BoxDecoration(
+          gradient: _loading
+              ? null
+              : const LinearGradient(
+                  colors: [Color(0xFF1A56DB), Color(0xFF4D8EF7)],
+                ),
+          color: _loading ? const Color(0xFF1A2D47) : null,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: _loading
+              ? null
+              : [
+                  BoxShadow(
+                    color: const Color(0xFF1A56DB).withOpacity(0.4),
+                    blurRadius: 20,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (_loading)
+              const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Color(0xFF4D8EF7),
+                ),
+              )
+            else
+              const Icon(Icons.contactless_outlined,
+                  color: Colors.white, size: 20),
+            const SizedBox(width: 10),
+            Text(
+              _loading ? 'Invio in corso...' : 'Scambia biglietto',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: _loading ? const Color(0xFF8BA3C7) : Colors.white,
+                letterSpacing: 0.2,
               ),
-            )
-          : const Icon(Icons.contactless),
-      label: Text(_loading ? 'Invio...' : 'Scambia biglietto'),
-      onPressed: _loading ? null : _send,
-      style: FilledButton.styleFrom(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ],
+        ),
       ),
     );
   }
