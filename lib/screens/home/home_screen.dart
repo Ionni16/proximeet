@@ -82,8 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
       },
       child: Scaffold(
         backgroundColor: const Color(0xFF050D1E),
-        // extendBody rimosso: con la custom nav bar glass,
-        // il body NON deve andare sotto la barra per evitare overflow.
+        extendBody: false,
         appBar: _buildAppBar(),
         body: IndexedStack(
           index: _selectedIndex,
@@ -129,7 +128,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   width: 28,
                   height: 28,
                   child: Icon(Icons.wifi_tethering,
-                      size: 22, color: Color(0xFF4D8EF7)),
+                      size: 21, color: Color(0xFF4D8EF7)),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -234,7 +233,7 @@ class _HomeScreenState extends State<HomeScreen> {
           child: SafeArea(
             top: false,
             child: SizedBox(
-              height: 60,
+              height: 64,
               child: Row(
                 children: [
                   _NavItem(
@@ -294,7 +293,7 @@ class _NavItem extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.symmetric(vertical: 4),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -303,7 +302,7 @@ class _NavItem extends StatelessWidget {
                 duration: const Duration(milliseconds: 200),
                 width: selected ? 48 : 0,
                 height: 3,
-                margin: const EdgeInsets.only(bottom: 4),
+                margin: const EdgeInsets.only(bottom: 3),
                 decoration: BoxDecoration(
                   color: selected ? activeColor : Colors.transparent,
                   borderRadius: BorderRadius.circular(2),
@@ -319,7 +318,7 @@ class _NavItem extends StatelessWidget {
               ),
               Icon(
                 selected ? activeIcon : icon,
-                size: 22,
+                size: 21,
                 color: selected ? activeColor : inactiveColor,
               ),
               const SizedBox(height: 2),

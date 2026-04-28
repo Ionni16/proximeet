@@ -143,7 +143,7 @@ class _RadarViewState extends State<RadarView>
                             ),
                             child: Center(
                               child: Text(
-                                widget.currentUser.firstName[0].toUpperCase(),
+                                (widget.currentUser.firstName.trim().isNotEmpty ? widget.currentUser.firstName.trim()[0] : '?').toUpperCase(),
                                 style: const TextStyle(
                                   fontSize: 22,
                                   fontWeight: FontWeight.w700,
@@ -166,8 +166,8 @@ class _RadarViewState extends State<RadarView>
         // ── Strip orizzontale rilevati ──
         if (widget.nearbyUsers.isNotEmpty)
           Container(
-            height: 110,
-            padding: const EdgeInsets.only(left: 16, right: 8, bottom: 8),
+            height: 96,
+            padding: const EdgeInsets.only(left: 12, right: 8, bottom: 4),
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemCount: widget.nearbyUsers.length,
@@ -177,8 +177,8 @@ class _RadarViewState extends State<RadarView>
                 return GestureDetector(
                   onTap: () => widget.onUserTap(nearby),
                   child: Container(
-                    width: 88,
-                    padding: const EdgeInsets.all(10),
+                    width: 82,
+                    padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
                       color: const Color(0xFF0D1B30),
                       borderRadius: BorderRadius.circular(16),
@@ -199,7 +199,7 @@ class _RadarViewState extends State<RadarView>
                         UserAvatar(
                           imageUrl: nearby.avatarURL,
                           name: nearby.displayName,
-                          size: 38,
+                          size: 34,
                         ),
                         const SizedBox(height: 5),
                         Text(
@@ -442,7 +442,7 @@ class _RadarBlip extends StatelessWidget {
       ),
       child: Center(
         child: Text(
-          nearby.firstName[0].toUpperCase(),
+          (nearby.firstName.trim().isNotEmpty ? nearby.firstName.trim()[0] : '?').toUpperCase(),
           style: TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.w700,
