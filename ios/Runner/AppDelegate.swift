@@ -3,10 +3,6 @@ import UIKit
 import CoreBluetooth
 import CoreLocation
 
-// ──────────────────────────────────────────────────────────────────────────────
-// AppDelegate
-// ──────────────────────────────────────────────────────────────────────────────
-
 @main
 @objc class AppDelegate: FlutterAppDelegate {
 
@@ -34,42 +30,11 @@ import CoreLocation
   }
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// ProxiMeetBeaconPlugin
-//
-// STRATEGIA ARCHITETTURALE (riscrittura completa, stable build):
-//
-// 1. UNA SOLA MODALITÀ DI ADVERTISING: iBeacon. Niente switching tra
-//    iBeacon e service-data. Lo switching ripetuto è la causa primaria
-//    dei crash su iOS 26 — il controller BT entra in stato inconsistente.
-//
-// 2. NIENTE TIMER PERIODICI CHE TOCCANO IL BT. L'unica eccezione è un
-//    timer di stato leggero (solo emit), che non chiama mai start/stop.
-//
-// 3. STATE GUARDS RIGIDI: isAdvertising e isRanging vengono tracciati
-//    esplicitamente. Non chiamiamo mai startAdvertising se già attivo,
-//    né stopAdvertising se non attivo. Idem per ranging.
-//
-// 4. RESUME LIFECYCLE: applicationDidBecomeActive verifica lo stato dei
-//    manager e riavvia ranging/advertising solo se necessario. Non fa
-//    mai stop+start ravvicinati.
-//
-// 5. CROSS-PLATFORM:
-//    - iOS ↔ iOS: CoreLocation iBeacon ranging (background-capable).
-//    - iOS → Android: iOS advertises iBeacon, Android ne legge i raw
-//      bytes con parseIBeacon() (foreground iOS necessario — limite
-//      Apple invarcabile).
-//    - Android → iOS: Android advertises iBeacon, iOS lo riceve via
-//      CoreLocation ranging.
-//    - Android ↔ Android: già funzionante.
-// ──────────────────────────────────────────────────────────────────────────────
-
 final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
                                     CLLocationManagerDelegate, CBPeripheralManagerDelegate {
 
   static let shared = ProxiMeetBeaconPlugin()
 
-  // ── Channels ────────────────────────────────────────────────────────────────
   static func register(with messenger: FlutterBinaryMessenger) {
     let methodChannel = FlutterMethodChannel(
       name: "proximeet/beacon",
@@ -107,7 +72,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     eventChannel.setStreamHandler(ProxiMeetBeaconPlugin.shared)
   }
 
-  // ── FlutterStreamHandler ─────────────────────────────────────────────────────
   func onListen(withArguments arguments: Any?,
                 eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
@@ -118,7 +82,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     return nil
   }
 
-  // ── State ────────────────────────────────────────────────────────────────────
   private var locationManager:   CLLocationManager?
   private var peripheralManager: CBPeripheralManager?
   private var rxRegion:          CLBeaconRegion?
@@ -130,32 +93,21 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
   private var ownMinor:    CLBeaconMinorValue = 0
   private var currentUuid: UUID?
 
-  /// Top-level "I want to be running" flag set by start(), cleared by stop().
   private var isStarted   = false
-
-  /// Tracks whether iBeacon ranging is actively running. Prevents double-start.
   private var isRanging   = false
-
-  /// Tracks whether iBeacon advertising is actively running. Prevents double-start.
   private var isAdvertising = false
 
   private let regionIdentifier = "com.ionut.proximeet.proximeeet_app.ibeacon"
 
-  // ── RSSI smoothing (matches Android behavior) ───────────────────────────────
   private var rssiSmoothed:    [String: Double]      = [:]
   private var lastEmitAt:      [String: TimeInterval] = [:]
   private let ewmaAlpha:       Double = 0.25
   private let minEmitInterval: TimeInterval = 0.8
   private let minValidRssi     = -100
 
-  // ── State watchdog (LIGHT — only emits status, never touches BT) ────────────
   private var stateReportTimer: Timer?
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // START
-  // ────────────────────────────────────────────────────────────────────────────
   func start(uuidString: String, major: Int, minor: Int, result: @escaping FlutterResult) {
-    // ── Validate args ─────────────────────────────────────────────────────────
     guard let uuid = UUID(uuidString: uuidString) else {
       result(FlutterError(code: "BAD_UUID",
                           message: "UUID iBeacon non valido",
@@ -175,7 +127,13 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
       return
     }
 
-    // ── Idempotency: if already started with same params, just resume ─────────
+    guard CLLocationManager.locationServicesEnabled() else {
+      result(FlutterError(code: "LOCATION_SERVICES_OFF",
+                          message: "Servizi di localizzazione disattivati a livello di sistema.",
+                          details: nil))
+      return
+    }
+
     if isStarted, currentUuid == uuid,
        Int(ownMajor) == major, Int(ownMinor) == minor {
       ensureRangingRunning()
@@ -184,10 +142,8 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
       return
     }
 
-    // ── Clean stop of any previous session ────────────────────────────────────
     stopInternal(keepEventSink: true)
 
-    // ── Set up new state ──────────────────────────────────────────────────────
     isStarted   = true
     currentUuid = uuid
     ownMajor    = CLBeaconMajorValue(major)
@@ -195,25 +151,20 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     rssiSmoothed.removeAll()
     lastEmitAt.removeAll()
 
-    // ── Allocate location manager (for ranging) ───────────────────────────────
     let manager = CLLocationManager()
     manager.delegate = self
     manager.pausesLocationUpdatesAutomatically = false
     manager.distanceFilter = kCLDistanceFilterNone
-    // Background location updates require "location" UIBackgroundMode.
-    // Already configured in Info.plist.
-    manager.allowsBackgroundLocationUpdates   = true
+    manager.allowsBackgroundLocationUpdates   = false
     manager.showsBackgroundLocationIndicator  = false
     locationManager = manager
 
-    // ── Build rx region (what we listen for) ──────────────────────────────────
     let rx = CLBeaconRegion(uuid: uuid, identifier: regionIdentifier)
     rx.notifyOnEntry             = true
     rx.notifyOnExit              = true
     rx.notifyEntryStateOnDisplay = true
     rxRegion = rx
 
-    // ── Build tx region (what we advertise) and pre-compute payload ───────────
     let tx = CLBeaconRegion(uuid: uuid,
                             major: ownMajor,
                             minor: ownMinor,
@@ -225,51 +176,45 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     } else {
       advertisingPayload = nil
       emit(["type": "advertiseError",
-            "message": "Cast payload iBeacon fallito (peripheralData non è [String: Any])",
+            "message": "Cast payload iBeacon fallito",
             "platform": "ios"])
     }
 
-    // ── Allocate peripheral manager (for advertising) ─────────────────────────
-    // Allocate AFTER setting payload so peripheralManagerDidUpdateState has it.
     peripheralManager = CBPeripheralManager(delegate: self, queue: nil)
 
-    // ── Kick off authorization flow → callbacks will start ranging + adv ──────
+    // FIX AUTORIZZAZIONI FOREGROUND/BACKGROUND
     let status = currentAuthorizationStatus(for: manager)
     switch status {
     case .notDetermined:
-      manager.requestAlwaysAuthorization()
-    case .authorizedWhenInUse:
-      manager.requestAlwaysAuthorization()
-      ensureRangingRunning()
-    case .authorizedAlways:
+      manager.requestWhenInUseAuthorization() // Richiesta robusta per iOS 14+
+    case .authorizedWhenInUse, .authorizedAlways:
       ensureRangingRunning()
     case .restricted, .denied:
       emit(["type": "locationAuthorization",
             "status": status.rawValue, "platform": "ios"])
+      result(FlutterError(code: "LOCATION_DENIED",
+                          message: "Autorizzazione localizzazione negata o limitata.",
+                          details: ["status": status.rawValue]))
+      return
     @unknown default:
       emit(["type": "locationAuthorization",
             "status": status.rawValue, "platform": "ios"])
+      result(FlutterError(code: "LOCATION_UNKNOWN_STATUS",
+                          message: "Stato autorizzazione localizzazione non gestito.",
+                          details: ["status": status.rawValue]))
+      return
     }
 
     startStateReportTimer()
-
-    // Native start is asynchronous: BT state and auth callbacks will follow.
     result(true)
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // LIFECYCLE — called from applicationDidBecomeActive
-  // ────────────────────────────────────────────────────────────────────────────
   func applicationDidBecomeActive() {
     guard isStarted else { return }
-    // Just verify and ensure: never blindly stop+start.
     ensureRangingRunning()
     ensureAdvertisingRunning()
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // STOP
-  // ────────────────────────────────────────────────────────────────────────────
   func stop() {
     stopInternal(keepEventSink: true)
   }
@@ -277,14 +222,12 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
   private func stopInternal(keepEventSink: Bool) {
     stopStateReportTimer()
 
-    // ── Stop advertising idempotently ─────────────────────────────────────────
     if isAdvertising, let pm = peripheralManager {
       pm.stopAdvertising()
     }
     isAdvertising = false
     peripheralManager = nil
 
-    // ── Stop ranging + monitoring idempotently ────────────────────────────────
     if let manager = locationManager {
       if let rx = rxRegion {
         if isRanging {
@@ -296,7 +239,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
         }
         manager.stopMonitoring(for: rx)
       }
-      // Defensive: stop monitoring any leftover regions with our identifier.
       for region in manager.monitoredRegions
           where region.identifier.hasPrefix(regionIdentifier) {
         manager.stopMonitoring(for: region)
@@ -318,9 +260,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     if !keepEventSink { eventSink = nil }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // ENSURE: idempotent helpers — only act if state requires it
-  // ────────────────────────────────────────────────────────────────────────────
   private func ensureRangingRunning() {
     guard isStarted, !isRanging,
           let manager = locationManager,
@@ -351,12 +290,8 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
           let payload = advertisingPayload else { return }
 
     pm.startAdvertising(payload)
-    // isAdvertising is set to true in didStartAdvertising callback.
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // STATE REPORT TIMER (lightweight — only emits status events)
-  // ────────────────────────────────────────────────────────────────────────────
   private func startStateReportTimer() {
     stopStateReportTimer()
     stateReportTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) {
@@ -372,8 +307,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
         "isAdvertising": self.isAdvertising,
         "platform": "ios"
       ])
-      // Light self-heal: if state is good but flags say nothing's running,
-      // attempt to resume. Does NOT stop+restart anything already running.
       self.ensureRangingRunning()
       self.ensureAdvertisingRunning()
     }
@@ -384,9 +317,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     stateReportTimer = nil
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // CBPeripheralManagerDelegate
-  // ────────────────────────────────────────────────────────────────────────────
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
     switch peripheral.state {
     case .poweredOn:
@@ -394,7 +324,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
       ensureAdvertisingRunning()
     case .poweredOff:
       emit(["type": "bluetoothOff", "platform": "ios"])
-      // BT off → advertising stops automatically; mirror our flag.
       isAdvertising = false
     case .unauthorized:
       emit(["type": "bluetoothUnauthorized", "platform": "ios"])
@@ -423,9 +352,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // CLLocationManagerDelegate — Authorization
-  // ────────────────────────────────────────────────────────────────────────────
   @available(iOS 14.0, *)
   func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
     handleAuthorization(currentAuthorizationStatus(for: manager), manager: manager)
@@ -441,10 +367,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     emit(["type": "locationAuthorization",
           "status": status.rawValue, "platform": "ios"])
     switch status {
-    case .authorizedAlways:
-      ensureRangingRunning()
-    case .authorizedWhenInUse:
-      manager.requestAlwaysAuthorization()
+    case .authorizedAlways, .authorizedWhenInUse:
       ensureRangingRunning()
     case .denied, .restricted:
       isRanging = false
@@ -452,7 +375,7 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
             "message": "Autorizzazione localizzazione negata o limitata.",
             "platform": "ios"])
     case .notDetermined:
-      manager.requestAlwaysAuthorization()
+      manager.requestWhenInUseAuthorization()
     @unknown default:
       break
     }
@@ -463,9 +386,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     return CLLocationManager.authorizationStatus()
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // CLLocationManagerDelegate — Errors / state
-  // ────────────────────────────────────────────────────────────────────────────
   func locationManager(_ manager: CLLocationManager,
                        didDetermineState state: CLRegionState,
                        for region: CLRegion) {
@@ -487,9 +407,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
           "message": error.localizedDescription, "platform": "ios"])
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // CLLocationManagerDelegate — Ranging callbacks
-  // ────────────────────────────────────────────────────────────────────────────
   @available(iOS 13.0, *)
   func locationManager(_ manager: CLLocationManager,
                        didRange beacons: [CLBeacon],
@@ -510,7 +427,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
 
       let foundMajor = beacon.major.intValue
       let foundMinor = beacon.minor.intValue
-      // Ignore self
       if foundMajor == Int(ownMajor) && foundMinor == Int(ownMinor) { continue }
 
       let key = "\(foundMajor)_\(foundMinor)"
@@ -543,9 +459,6 @@ final class ProxiMeetBeaconPlugin: NSObject, FlutterStreamHandler,
     }
   }
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // Emit helper
-  // ────────────────────────────────────────────────────────────────────────────
   private func emit(_ payload: [String: Any]) {
     DispatchQueue.main.async { [weak self] in
       self?.eventSink?(payload)

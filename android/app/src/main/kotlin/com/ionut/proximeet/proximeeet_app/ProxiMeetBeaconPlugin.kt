@@ -29,19 +29,6 @@ import java.util.UUID
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Android/iBeacon implementation for ProxiMeet.
- *
- * Important Android detail:
- * Many OPPO/ColorOS, Xiaomi/MIUI and some mid-range Qualcomm devices do not reliably deliver
- * BLE scan callbacks while the same app is also BLE-advertising. They report scanStarted but
- * callbacks remain 0. For that reason Android uses a deterministic time-sliced strategy:
- *   - scan most of the time
- *   - briefly advertise every cycle
- *   - never scan and advertise at the same time
- *
- * iPhone can advertise/scan more reliably; Android cannot be treated the same way.
- */
 class ProxiMeetBeaconPlugin(
     private val activity: Activity,
     messenger: BinaryMessenger
@@ -130,8 +117,8 @@ class ProxiMeetBeaconPlugin(
             return
         }
 
-        if (!hasRequiredPermissions()) {
-            result.error("NO_PERMISSION", missingPermissionsMessage(), null)
+        if (!hasScanPermissions()) {
+            result.error("NO_SCAN_PERMISSION", missingScanPermissionsMessage(), null)
             return
         }
 
@@ -153,44 +140,60 @@ class ProxiMeetBeaconPlugin(
             return
         }
 
-        if (!bluetoothAdapter.isMultipleAdvertisementSupported || advertiser == null) {
-            emit(mapOf("type" to "advertiseError", "code" to "ADV_UNSUPPORTED", "platform" to "android"))
+        val canAdvertise = bluetoothAdapter.isMultipleAdvertisementSupported && advertiser != null && hasAdvertisePermission()
+        if (!canAdvertise) {
+            emit(mapOf("type" to "advertiseUnavailable", "reason" to advertiseUnavailableReason(bluetoothAdapter), "platform" to "android"))
         }
 
-        // Start in scan-only mode. This is the important fix for OPPO/ColorOS.
-        val scanOk = startScanning(parsedUuid, filtered = true)
+        val scanOk = startScanning(parsedUuid, filtered = false)
         if (!scanOk) {
             result.error("SCAN_START_FALSE", "Lo scan BLE non è partito", null)
             return
         }
 
         scheduleWatchdog(parsedUuid)
-        scheduleAdvertisePulses(parsedUuid, major, minor)
+        if (canAdvertise) {
+            scheduleAdvertisePulses(parsedUuid, major, minor)
+        } else {
+            emit(mapOf("type" to "androidBleMode", "mode" to "scanOnly", "platform" to "android"))
+        }
 
         result.success(true)
     }
 
-    private fun hasRequiredPermissions(): Boolean {
+    private fun hasScanPermissions(): Boolean {
         val fineLocationOk = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             fineLocationOk &&
                 hasPermission(Manifest.permission.BLUETOOTH_SCAN) &&
-                hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE) &&
                 hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
         } else {
             fineLocationOk
         }
     }
 
-    private fun missingPermissionsMessage(): String {
+    private fun hasAdvertisePermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+    }
+
+    private fun missingScanPermissionsMessage(): String {
         val missing = mutableListOf<String>()
         if (!hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) missing.add("ACCESS_FINE_LOCATION")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (!hasPermission(Manifest.permission.BLUETOOTH_SCAN)) missing.add("BLUETOOTH_SCAN")
-            if (!hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE)) missing.add("BLUETOOTH_ADVERTISE")
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) missing.add("BLUETOOTH_CONNECT")
         }
-        return "Permessi mancanti: ${missing.joinToString(", ")}"
+        return "Permessi scan mancanti: ${missing.joinToString(", ")}"
+    }
+
+    private fun advertiseUnavailableReason(bluetoothAdapter: BluetoothAdapter): String {
+        return when {
+            !hasAdvertisePermission() -> "BLUETOOTH_ADVERTISE permission missing"
+            advertiser == null -> "BluetoothLeAdvertiser null"
+            !bluetoothAdapter.isMultipleAdvertisementSupported -> "multiple advertisement unsupported"
+            else -> "unknown"
+        }
     }
 
     private fun hasPermission(permission: String): Boolean =
@@ -282,6 +285,11 @@ class ProxiMeetBeaconPlugin(
     private fun startAdvertising(uuid: UUID, major: Int, minor: Int) {
         stopAdvertisingOnly()
 
+        if (!hasAdvertisePermission()) {
+            emit(mapOf("type" to "advertiseError", "code" to "NO_ADVERTISE_PERMISSION", "platform" to "android"))
+            return
+        }
+
         val a = advertiser ?: return
         val payload = buildIBeaconPayload(uuid, major, minor, DEFAULT_TX_POWER)
 
@@ -324,14 +332,13 @@ class ProxiMeetBeaconPlugin(
             override fun run() {
                 if (expectedUuid == null) return
 
-                // Do not RX and TX at the same time on problematic Android devices.
                 stopScanningOnly()
                 startAdvertising(uuid, major, minor)
 
                 mainHandler.postDelayed({
                     stopAdvertisingOnly()
                     if (expectedUuid != null) {
-                        startScanning(uuid, filtered = !filteredScanFailedOnce)
+                        startScanning(uuid, filtered = false)
                     }
                 }, ADVERTISE_PULSE_MS)
 
@@ -372,10 +379,8 @@ class ProxiMeetBeaconPlugin(
                     )
                 )
 
-                // If the filtered scan registers but receives nothing, switch to unfiltered.
-                // This fixes devices whose BLE stack does not apply manufacturer filters correctly.
-                if (scanMode == "filtered" && rawCallbacksInWindow == 0) {
-                    filteredScanFailedOnce = true
+                if (rawCallbacksInWindow == 0) {
+                    emit(mapOf("type" to "scanRestart", "reason" to "noCallbacks", "platform" to "android"))
                     startScanning(uuid, filtered = false)
                 } else {
                     rawCallbacksInWindow = 0
@@ -397,13 +402,40 @@ class ProxiMeetBeaconPlugin(
         return min(maxOffset, hash % max(1L, maxOffset))
     }
 
-    private fun parseIBeacon(result: ScanResult, expectedUuid: UUID): Map<String, Any>? {
-        val bytes = result.scanRecord?.getManufacturerSpecificData(APPLE_COMPANY_ID)
-            ?: parseManufacturerDataFromRawBytes(result)
-            ?: return null
+    // FIX ANDROID CHE IGNORAVA IOS 
+    private fun extractIBeaconBytes(result: ScanResult): ByteArray? {
+        val rawBytes = result.scanRecord?.bytes ?: return null
+        var offset = 0
 
-        if (bytes.size < IBEACON_PAYLOAD_LENGTH) return null
-        if (bytes[0] != 0x02.toByte() || bytes[1] != 0x15.toByte()) return null
+        while (offset < rawBytes.size) {
+            val length = rawBytes[offset].toInt() and 0xFF
+            if (length == 0) break
+            if (offset + length >= rawBytes.size) break
+
+            val adType = rawBytes[offset + 1].toInt() and 0xFF
+            if (adType == 0xFF && length >= 5) {
+                val companyIdLow = rawBytes[offset + 2].toInt() and 0xFF
+                val companyIdHigh = rawBytes[offset + 3].toInt() and 0xFF
+                val companyId = (companyIdHigh shl 8) or companyIdLow
+
+                if (companyId == APPLE_COMPANY_ID) {
+                    val dataStart = offset + 4
+                    val dataLength = length - 3
+                    if (dataLength >= 2 && rawBytes[dataStart] == 0x02.toByte() && rawBytes[dataStart + 1] == 0x15.toByte()) {
+                        if (dataLength >= IBEACON_PAYLOAD_LENGTH) {
+                            return rawBytes.copyOfRange(dataStart, dataStart + dataLength)
+                        }
+                    }
+                }
+            }
+            offset += length + 1
+        }
+        return null
+    }
+
+    private fun parseIBeacon(result: ScanResult, expectedUuid: UUID): Map<String, Any>? {
+        val bytes = extractIBeaconBytes(result) ?: return null
+
         iBeaconCandidatesInWindow++
 
         val uuidBuffer = ByteBuffer.wrap(bytes, 2, 16)
@@ -438,36 +470,6 @@ class ProxiMeetBeaconPlugin(
             "rssi" to smoothed.toInt(),
             "platform" to "android"
         )
-    }
-
-    private fun parseManufacturerDataFromRawBytes(result: ScanResult): ByteArray? {
-        val rawBytes = result.scanRecord?.bytes ?: return null
-        var offset = 0
-
-        while (offset < rawBytes.size) {
-            val length = rawBytes[offset].toInt() and 0xFF
-            if (length == 0) break
-            if (offset + length >= rawBytes.size) break
-
-            val adType = rawBytes[offset + 1].toInt() and 0xFF
-            if (adType == 0xFF && length >= 3) {
-                val companyIdLow = rawBytes[offset + 2].toInt() and 0xFF
-                val companyIdHigh = rawBytes[offset + 3].toInt() and 0xFF
-                val companyId = (companyIdHigh shl 8) or companyIdLow
-
-                if (companyId == APPLE_COMPANY_ID) {
-                    val dataStart = offset + 4
-                    val dataLength = length - 3
-                    if (dataLength > 0 && dataStart + dataLength <= rawBytes.size) {
-                        return rawBytes.copyOfRange(dataStart, dataStart + dataLength)
-                    }
-                }
-            }
-
-            offset += length + 1
-        }
-
-        return null
     }
 
     private fun buildIBeaconPayload(uuid: UUID, major: Int, minor: Int, txPower: Int): ByteArray {
@@ -519,7 +521,6 @@ class ProxiMeetBeaconPlugin(
         rssiSmoothed.clear()
         lastEmitAt.clear()
     }
-
 
     private fun emit(payload: Map<String, Any>) {
         mainHandler.post {

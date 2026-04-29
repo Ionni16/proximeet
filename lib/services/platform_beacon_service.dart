@@ -10,18 +10,9 @@ import 'debug_error_service.dart';
 
 class PlatformBeaconService {
   PlatformBeaconService._() {
-    // ── FIX iOS BEACON_START_FALSE ─────────────────────────────────────────
+    // ── FIX iOS BEACON_START_FALSE E CRASH ──────────────────────────────────
     // La sottoscrizione all'EventChannel viene fatta UNA SOLA VOLTA qui,
-    // alla creazione del singleton.
-    //
-    // BUG ORIGINALE: _events.receiveBroadcastStream().listen() era chiamato
-    // dentro start(), e stop() faceva cancel() su quella subscription.
-    // Su iOS, ri-sottoscriversi all'EventChannel dopo un cancel lancia
-    // una PlatformException silenziosa nel catch block di start(),
-    // che ritornava false → BEACON_START_FALSE.
-    //
-    // FIX: la subscription vive per tutta la vita del singleton.
-    // Non viene mai cancellata (solo in dispose()).
+    // alla creazione del singleton. Vive per tutta l'esecuzione dell'app.
     // start() e stop() chiamano solo il MethodChannel nativo per
     // avviare/fermare advertising+ranging; lo stream di eventi rimane aperto.
     // ─────────────────────────────────────────────────────────────────────────
@@ -49,7 +40,7 @@ class PlatformBeaconService {
   final StreamController<RawBleDetection> _controller =
       StreamController<RawBleDetection>.broadcast();
 
-  // Subscription persistente: non viene mai cancellata fuori da dispose().
+  // Subscription persistente: non viene mai cancellata.
   StreamSubscription<dynamic>? _nativeSub;
 
   bool _isRunning = false;
@@ -212,10 +203,9 @@ class PlatformBeaconService {
     Log.d('BEACON', 'Fermato');
   }
 
-  void dispose() {
-    _stopNative();
-    _nativeSub?.cancel();
-    _nativeSub = null;
-    _controller.close();
+  Future<void> dispose() async {
+    await _stopNative();
+    // NOTA: Non cancelliamo _nativeSub né _controller qui: il servizio è un
+    // singleton e gli stream devono restare vivi per i rientri nella schermata radar.
   }
 }
