@@ -72,21 +72,48 @@ class _RequestCardState extends State<_RequestCard> {
   String? _senderName;
   String? _senderRole;
   String? _senderCompany;
+  String? _senderAvatarURL;
+  String? _loadError;
 
   @override
   void initState() {
     super.initState();
+    if (widget.request.senderDisplayName.isNotEmpty) {
+      _senderName = widget.request.senderDisplayName;
+      _senderRole = widget.request.senderRole;
+      _senderCompany = widget.request.senderCompany;
+      _senderAvatarURL = widget.request.senderAvatarURL;
+    }
     _loadSender();
   }
 
   Future<void> _loadSender() async {
-    final user = await FirestoreService.instance
-        .getUserByUid(widget.request.senderUid);
-    if (mounted) {
+    try {
+      final user = await FirestoreService.instance
+          .getUserByUid(widget.request.senderUid)
+          .timeout(const Duration(seconds: 8));
+
+      if (!mounted) return;
       setState(() {
-        _senderName = user?.fullName ?? 'Utente sconosciuto';
-        _senderRole = user?.role ?? '';
-        _senderCompany = user?.company ?? '';
+        _senderName = user?.fullName.isNotEmpty == true
+            ? user!.fullName
+            : (_senderName?.isNotEmpty == true
+                ? _senderName
+                : 'Utente sconosciuto');
+        _senderRole = user?.role ?? _senderRole ?? '';
+        _senderCompany = user?.company ?? _senderCompany ?? '';
+        _senderAvatarURL = user?.avatarURL.trim().isNotEmpty == true
+            ? user!.avatarURL.trim()
+            : _senderAvatarURL;
+        _loadError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _senderName = _senderName?.isNotEmpty == true
+            ? _senderName
+            : 'Utente non caricato';
+        _loadError = e.toString().replaceAll('Exception: ', '');
       });
     }
   }
@@ -139,6 +166,7 @@ class _RequestCardState extends State<_RequestCard> {
           Row(
             children: [
               UserAvatar(
+                imageUrl: _senderAvatarURL,
                 name: _senderName ?? '?',
                 size: 52,
               ),
@@ -160,6 +188,18 @@ class _RequestCardState extends State<_RequestCard> {
                         style: TextStyle(
                           fontSize: 12,
                           color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                    if (_loadError != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Profilo non caricato: $_loadError',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: theme.colorScheme.error,
                         ),
                       ),
                     ],

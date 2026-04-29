@@ -5,6 +5,10 @@ class ConnectionRequest {
   final String eventId;
   final String status;
   final DateTime? createdAt;
+  final String senderDisplayName;
+  final String senderRole;
+  final String senderCompany;
+  final String senderAvatarURL;
 
   ConnectionRequest({
     required this.id,
@@ -13,6 +17,10 @@ class ConnectionRequest {
     required this.eventId,
     required this.status,
     this.createdAt,
+    this.senderDisplayName = '',
+    this.senderRole = '',
+    this.senderCompany = '',
+    this.senderAvatarURL = '',
   });
 
   factory ConnectionRequest.fromMap(String id, Map<String, dynamic> map) {
@@ -23,6 +31,10 @@ class ConnectionRequest {
       eventId: (map['eventId'] ?? '').toString(),
       status: (map['status'] ?? 'pending').toString(),
       createdAt: map['createdAt']?.toDate(),
+      senderDisplayName: (map['senderDisplayName'] ?? '').toString().trim(),
+      senderRole: (map['senderRole'] ?? '').toString().trim(),
+      senderCompany: (map['senderCompany'] ?? '').toString().trim(),
+      senderAvatarURL: (map['senderAvatarURL'] ?? '').toString().trim(),
     );
   }
 }

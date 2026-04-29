@@ -61,8 +61,14 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         return;
       }
 
-      // Invia richiesta contatto
-      await FirestoreService.instance.sendConnectionRequest(targetUid);
+      final qrEventId = uri.queryParameters['event'] ?? '';
+
+      // Invia richiesta contatto via QR: il QR sostituisce il gating BLE.
+      await FirestoreService.instance.sendConnectionRequest(
+        targetUid,
+        fromQr: true,
+        qrEventId: qrEventId,
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
