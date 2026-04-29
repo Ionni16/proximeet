@@ -77,13 +77,18 @@ class NearbyUser {
 
 /// Rilevazione BLE grezza, prima del resolve verso profilo utente.
 class RawBleDetection {
+  /// Token BLE temporaneo letto via GATT.
+  ///
+  /// Il nome resta sessionBleId per compatibilità con i servizi esistenti.
   final String sessionBleId;
   final int rssi;
   final DateTime timestamp;
+  final String transport;
 
   RawBleDetection({
     required this.sessionBleId,
     required this.rssi,
     required this.timestamp,
+    this.transport = 'ble_gatt',
   });
 }

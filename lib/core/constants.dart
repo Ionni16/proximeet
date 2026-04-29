@@ -2,8 +2,15 @@ abstract final class AppConstants {
   static const String proximeetBeaconUuid =
       'F2703C30-FA18-4173-8599-016070383C81';
 
-  /// Compatibilità col codice esistente: ora sessionBleId = beaconKey "major_minor".
-  static const int sessionBleIdLength = 11;
+  /// BLE GATT primario: Service UUID fisso + characteristic token temporaneo.
+  static const String proximeetGattServiceUuid =
+      'F2703C30-FA18-4173-8599-016070383C81';
+  static const String proximeetGattTokenCharacteristicUuid =
+      'F2703C31-FA18-4173-8599-016070383C81';
+
+  /// Compatibilità col codice esistente: sessionBleId ora contiene il token
+  /// temporaneo, non più necessariamente il beaconKey major_minor.
+  static const int sessionBleIdLength = 64;
 
   static String beaconKey(int major, int minor) {
     return '${major.toString().padLeft(5, '0')}_${minor.toString().padLeft(5, '0')}';
@@ -29,6 +36,12 @@ abstract final class AppConstants {
     }
   }
 
+  static bool isValidProximityToken(String token) {
+    if (token.trim() != token) return false;
+    if (token.length < 16 || token.length > 128) return false;
+    return RegExp(r'^[A-Za-z0-9._:-]+$').hasMatch(token);
+  }
+
   static const int scanIntervalSeconds = 8;
   static const int scanDurationSeconds = 5;
   static const int staleThresholdSeconds = 60;
@@ -36,28 +49,12 @@ abstract final class AppConstants {
   static const int contactGatingSeconds = 120;
   static const int heartbeatIntervalSeconds = 30;
 
-  // ── Soglie RSSI (dBm) calibrate per BLE iBeacon con EWMA smoothing ──────
-  //
-  // Valori RSSI tipici per BLE iBeacon (TX power -59 dBm, ambienti reali):
-  //   0-0.5 m  → RSSI ≈ -40 / -60 dBm
-  //   1-2 m    → RSSI ≈ -60 / -72 dBm
-  //   3-5 m    → RSSI ≈ -72 / -82 dBm
-  //   > 5 m    → RSSI < -82 dBm
-  //
-  // Con EWMA smoothing (α=0.25 nativo + α=0.30 Dart) il segnale è stabile.
-  // Le soglie precedenti erano troppo permissive:
-  //   rssiVeryClose=-50 → solo 0-30 cm (troppo stretto)
-  //   rssiClose=-65     → ok
-  //   rssiMedium=-80    → ok
-  //
-  // Fix: abbassiamo leggermente rssiVeryClose a -55 per catturare anche
-  // le situazioni "stesso tavolo", e allarghiamo rssiClose a -68.
-  // ─────────────────────────────────────────────────────────────────────────
-  static const int rssiVeryClose = -55; // < ~1 m  → "Vicinissimo"
-  static const int rssiClose = -68;     // 1–3 m   → "Vicino"
-  static const int rssiMedium = -80;    // 3–8 m   → "Medio" (oltre: "Lontano")
+  static const int rssiVeryClose = -55;
+  static const int rssiClose = -68;
+  static const int rssiMedium = -80;
 
   static const int primarySeedColor = 0xFF1D9E75;
   static const int detectionWriteDebounceSeconds = 20;
   static const int nearbyResolveTtlSeconds = 120;
+  static const int proximityTokenTtlSeconds = 180;
 }

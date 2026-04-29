@@ -105,7 +105,7 @@ class DebugErrorService {
   String _firebaseSuggestion(FirebaseException e) {
     switch (e.code) {
       case 'permission-denied':
-        return 'Controlla le Firestore Rules per events/{eventId}/presence e events/{eventId}/bleMapping. Verifica anche che l’utente sia autenticato.';
+        return 'Controlla le Firestore Rules per events/{eventId}/presence e events/{eventId}/proximityTokens. Verifica anche che l’utente sia autenticato.';
       case 'unavailable':
         return 'Controlla connessione internet e stato Firebase. Riprova dopo qualche secondo.';
       case 'not-found':
@@ -120,17 +120,17 @@ class DebugErrorService {
   String _platformTitle(PlatformException e) {
     switch (e.code) {
       case 'BAD_ARGS':
-        return 'Parametri beacon mancanti';
+        return 'Parametri BLE GATT mancanti';
       case 'BAD_UUID':
-        return 'UUID iBeacon non valido';
-      case 'BAD_MAJOR_MINOR':
-        return 'Major/minor iBeacon non validi';
+        return 'UUID BLE GATT non valido';
+      case 'BAD_TOKEN':
+        return 'Token BLE non valido';
       case 'NO_PERMISSION':
         return 'Permessi nativi mancanti';
-      case 'BT_OFF':
+      case 'BLUETOOTH_OFF':
         return 'Bluetooth spento o non disponibile';
       case 'ADV_UNSUPPORTED':
-        return 'BLE advertising non supportato';
+        return 'BLE GATT advertising non supportato';
       default:
         return 'Errore nativo piattaforma';
     }
@@ -139,14 +139,14 @@ class DebugErrorService {
   String _platformSuggestion(PlatformException e) {
     switch (e.code) {
       case 'BAD_ARGS':
-        return 'Controlla PlatformBeaconService.start(): deve passare uuid, major e minor.';
+        return 'Controlla PlatformBeaconService.start(): deve passare serviceUuid, tokenCharacteristicUuid e token.';
       case 'BAD_UUID':
         return 'Controlla AppConstants.proximeetBeaconUuid.';
-      case 'BAD_MAJOR_MINOR':
-        return 'Controlla AppConstants.beaconKey() e parseBeaconKey(). Devono produrre valori 0...65535.';
+      case 'BAD_TOKEN':
+        return 'EventSessionService deve generare un token temporaneo valido.';
       case 'NO_PERMISSION':
         return 'Su iOS controlla Bluetooth/Localizzazione in Impostazioni. Su Android controlla BLUETOOTH_SCAN/ADVERTISE/CONNECT e Location.';
-      case 'BT_OFF':
+      case 'BLUETOOTH_OFF':
         return 'Attiva Bluetooth e riapri l’app.';
       case 'ADV_UNSUPPORTED':
         return 'Questo device Android non supporta BLE advertising. Il join deve comunque continuare.';

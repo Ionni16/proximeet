@@ -6,7 +6,7 @@ import '../core/logger.dart';
 import '../models/nearby_user.dart';
 import 'ble_scanner_service.dart';
 
-/// Profilo cachato dal bleMapping.
+/// Profilo cachato dal proximityTokens.
 class _CachedProfile {
   final String uid;
   final String displayName;
@@ -28,7 +28,7 @@ class _CachedProfile {
 /// Orchestratore tra BLE scanner e UI.
 ///
 /// 1. Ascolta [BleScannerService.detections]
-/// 2. Risolve sessionBleId → uid + profilo pubblico
+/// 2. Risolve token temporaneo → uid + profilo pubblico
 /// 3. Smoothing RSSI con EWMA (α=0.25) per stabilizzare il segnale
 /// 4. Filtra duplicati e stale
 /// 5. Scrive detections su Firestore (per gating)
@@ -109,11 +109,11 @@ class NearbyDetectionService {
     _mappingSub = _db
         .collection('events')
         .doc(eventId)
-        .collection('bleMapping')
+        .collection('proximityTokens')
         .snapshots()
         .listen(
       _onMappingChange,
-      onError: (e) => Log.e('NEARBY', 'Errore stream bleMapping', e),
+      onError: (e) => Log.e('NEARBY', 'Errore stream proximityTokens', e),
     );
 
     _cleanupTimer = Timer.periodic(
@@ -130,7 +130,7 @@ class NearbyDetectionService {
       final snap = await _db
           .collection('events')
           .doc(eventId)
-          .collection('bleMapping')
+          .collection('proximityTokens')
           .get();
 
       for (final doc in snap.docs) {
@@ -273,7 +273,7 @@ class NearbyDetectionService {
       final doc = await _db
           .collection('events')
           .doc(eventId)
-          .collection('bleMapping')
+          .collection('proximityTokens')
           .doc(sessionBleId)
           .get();
 

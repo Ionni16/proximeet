@@ -4,7 +4,16 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattServer
+import android.bluetooth.BluetoothGattServerCallback
+import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -20,15 +29,20 @@ import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelUuid
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import java.nio.ByteBuffer
 import java.util.UUID
-import kotlin.math.max
-import kotlin.math.min
 
+/**
+ * BLE GATT bidirezionale per ProxiMeet.
+ *
+ * Ogni device è contemporaneamente:
+ * - GATT server/peripheral: advertise Service UUID fisso + characteristic token leggibile.
+ * - GATT client/central: scan Service UUID, connectGatt, readCharacteristic(token).
+ */
 class ProxiMeetBeaconPlugin(
     private val activity: Activity,
     messenger: BinaryMessenger
@@ -39,56 +53,31 @@ class ProxiMeetBeaconPlugin(
     private var eventSink: EventChannel.EventSink? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val bluetoothManager = activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val bluetoothManager =
+        activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+
     private val adapter: BluetoothAdapter?
         get() = bluetoothManager.adapter
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var scanner: BluetoothLeScanner? = null
+    private var gattServer: BluetoothGattServer? = null
     private var advertiseCallback: AdvertiseCallback? = null
     private var scanCallback: ScanCallback? = null
 
-    private var expectedUuid: UUID? = null
-    private var myMajor: Int = -1
-    private var myMinor: Int = -1
+    private var serviceUuid: UUID = DEFAULT_SERVICE_UUID
+    private var tokenCharacteristicUuid: UUID = DEFAULT_TOKEN_CHARACTERISTIC_UUID
+    private var currentToken: String = ""
+    private var isStarted: Boolean = false
 
-    private var scanMode: String = "stopped"
-    private var rawCallbacksInWindow: Int = 0
-    private var iBeaconCandidatesInWindow: Int = 0
-    private var matchingBeaconsInWindow: Int = 0
-    private var filteredScanFailedOnce: Boolean = false
-
-    private var cycleRunnable: Runnable? = null
-    private var watchdogRunnable: Runnable? = null
-
-    private val rssiSmoothed = mutableMapOf<String, Float>()
-    private val lastEmitAt = mutableMapOf<String, Long>()
+    private val activeGatts = mutableMapOf<String, BluetoothGatt>()
+    private val resultRssi = mutableMapOf<String, Int>()
+    private val lastReadAt = mutableMapOf<String, Long>()
+    private val readThrottleMs = 3000L
 
     init {
         methodChannel.setMethodCallHandler(this)
         eventChannel.setStreamHandler(this)
-    }
-
-    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        when (call.method) {
-            "start" -> {
-                val uuidString = call.argument<String>("uuid")
-                val major = call.argument<Int>("major")
-                val minor = call.argument<Int>("minor")
-
-                if (uuidString.isNullOrBlank() || major == null || minor == null) {
-                    result.error("BAD_ARGS", "uuid, major e minor sono obbligatori", null)
-                    return
-                }
-
-                start(uuidString, major, minor, result)
-            }
-            "stop" -> {
-                stop()
-                result.success(true)
-            }
-            else -> result.notImplemented()
-        }
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -99,77 +88,399 @@ class ProxiMeetBeaconPlugin(
         eventSink = null
     }
 
-    private fun start(uuidString: String, major: Int, minor: Int, result: MethodChannel.Result) {
-        if (major !in 0..65535 || minor !in 0..65535) {
-            result.error("BAD_MAJOR_MINOR", "major/minor devono essere compresi tra 0 e 65535", null)
-            return
-        }
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            "start" -> {
+                val serviceUuidString = call.argument<String>("serviceUuid")
+                    ?: DEFAULT_SERVICE_UUID.toString()
+                val characteristicUuidString = call.argument<String>("tokenCharacteristicUuid")
+                    ?: DEFAULT_TOKEN_CHARACTERISTIC_UUID.toString()
+                val token = call.argument<String>("token")
 
-        val parsedUuid = try { UUID.fromString(uuidString) } catch (_: Exception) { null }
-        if (parsedUuid == null) {
-            result.error("BAD_UUID", "UUID iBeacon non valido: $uuidString", null)
-            return
-        }
+                if (token.isNullOrBlank()) {
+                    result.error("BAD_TOKEN", "token obbligatorio", null)
+                    return
+                }
 
+                try {
+                    start(serviceUuidString, characteristicUuidString, token, result)
+                } catch (e: Exception) {
+                    result.error("START_FAILED", e.message, null)
+                }
+            }
+
+            "stop" -> {
+                stop()
+                result.success(true)
+            }
+
+            else -> result.notImplemented()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun start(
+        serviceUuidString: String,
+        characteristicUuidString: String,
+        token: String,
+        result: MethodChannel.Result
+    ) {
         val bluetoothAdapter = adapter
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            result.error("BT_OFF", "Bluetooth spento o non disponibile", null)
+        if (bluetoothAdapter == null) {
+            result.error("NO_BLUETOOTH", "BluetoothAdapter non disponibile", null)
             return
         }
-
+        if (!bluetoothAdapter.isEnabled) {
+            result.error("BLUETOOTH_OFF", "Bluetooth spento", null)
+            return
+        }
         if (!hasScanPermissions()) {
-            result.error("NO_SCAN_PERMISSION", missingScanPermissionsMessage(), null)
+            result.error("MISSING_SCAN_PERMISSION", missingScanPermissionsMessage(), null)
+            return
+        }
+        if (!hasAdvertisePermission()) {
+            result.error("MISSING_ADVERTISE_PERMISSION", "BLUETOOTH_ADVERTISE mancante", null)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationEnabled()) {
+            result.error("LOCATION_OFF", "Localizzazione disattivata: richiesta per BLE scan su Android <= 11", null)
             return
         }
 
-        if (!isLocationEnabled()) {
-            result.error("LOCATION_OFF", "Attiva la geolocalizzazione di sistema: Android la richiede per lo scan BLE/iBeacon", null)
-            return
-        }
+        stopInternal(emitStopped = false)
 
-        stop()
+        serviceUuid = UUID.fromString(serviceUuidString)
+        tokenCharacteristicUuid = UUID.fromString(characteristicUuidString)
+        currentToken = token
+        isStarted = true
 
-        expectedUuid = parsedUuid
-        myMajor = major
-        myMinor = minor
         advertiser = bluetoothAdapter.bluetoothLeAdvertiser
         scanner = bluetoothAdapter.bluetoothLeScanner
 
-        if (scanner == null) {
-            result.error("SCANNER_NULL", "BLE scanner non disponibile su questo dispositivo", null)
-            return
+        startGattServer()
+        val advOk = startAdvertising()
+        val scanOk = startScanning()
+
+        emit(mapOf(
+            "type" to "startRequested",
+            "transport" to "ble_gatt",
+            "platform" to "android",
+            "advertising" to advOk,
+            "scanning" to scanOk,
+            "serviceUuid" to serviceUuid.toString(),
+            "tokenLength" to token.length
+        ))
+
+        result.success(advOk || scanOk)
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stop() {
+        stopInternal(emitStopped = true)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopInternal(emitStopped: Boolean) {
+        scanCallback?.let { cb ->
+            try { scanner?.stopScan(cb) } catch (_: Exception) {}
+        }
+        scanCallback = null
+
+        advertiseCallback?.let { cb ->
+            try { advertiser?.stopAdvertising(cb) } catch (_: Exception) {}
+        }
+        advertiseCallback = null
+
+        activeGatts.values.forEach { gatt ->
+            try { gatt.disconnect() } catch (_: Exception) {}
+            try { gatt.close() } catch (_: Exception) {}
+        }
+        activeGatts.clear()
+
+        try { gattServer?.clearServices() } catch (_: Exception) {}
+        try { gattServer?.close() } catch (_: Exception) {}
+        gattServer = null
+
+        resultRssi.clear()
+        lastReadAt.clear()
+        isStarted = false
+
+        if (emitStopped) {
+            emit(mapOf("type" to "stopped", "transport" to "ble_gatt", "platform" to "android"))
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startGattServer(): Boolean {
+        if (!hasConnectPermission()) return false
+
+        val server = bluetoothManager.openGattServer(activity, gattServerCallback) ?: return false
+        val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+        val characteristic = BluetoothGattCharacteristic(
+            tokenCharacteristicUuid,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            @Suppress("DEPRECATION")
+            characteristic.value = currentToken.toByteArray(Charsets.UTF_8)
         }
 
-        val canAdvertise = bluetoothAdapter.isMultipleAdvertisementSupported && advertiser != null && hasAdvertisePermission()
-        if (!canAdvertise) {
-            emit(mapOf("type" to "advertiseUnavailable", "reason" to advertiseUnavailableReason(bluetoothAdapter), "platform" to "android"))
+        service.addCharacteristic(characteristic)
+        server.addService(service)
+        gattServer = server
+
+        emit(mapOf("type" to "gattServerStarted", "transport" to "ble_gatt", "platform" to "android"))
+        return true
+    }
+
+    private val gattServerCallback = object : BluetoothGattServerCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            offset: Int,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (characteristic.uuid != tokenCharacteristicUuid) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                return
+            }
+
+            val full = currentToken.toByteArray(Charsets.UTF_8)
+            val value = if (offset in full.indices) full.copyOfRange(offset, full.size) else ByteArray(0)
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startAdvertising(): Boolean {
+        val adv = advertiser ?: return false
+        if (!hasAdvertisePermission()) return false
+
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setConnectable(true)
+            .setTimeout(0)
+            .build()
+
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
+            .addServiceUuid(ParcelUuid(serviceUuid))
+            .build()
+
+        advertiseCallback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                emit(mapOf("type" to "advertisingStarted", "transport" to "ble_gatt", "platform" to "android"))
+            }
+
+            override fun onStartFailure(errorCode: Int) {
+                emit(mapOf(
+                    "type" to "advertisingFailed",
+                    "transport" to "ble_gatt",
+                    "platform" to "android",
+                    "errorCode" to errorCode
+                ))
+            }
         }
 
-        val scanOk = startScanning(parsedUuid, filtered = false)
-        if (!scanOk) {
-            result.error("SCAN_START_FALSE", "Lo scan BLE non è partito", null)
-            return
+        return try {
+            adv.startAdvertising(settings, data, advertiseCallback)
+            true
+        } catch (e: Exception) {
+            emit(mapOf("type" to "advertisingException", "platform" to "android", "error" to e.message))
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startScanning(): Boolean {
+        val bleScanner = scanner ?: return false
+        if (!hasScanPermissions()) return false
+
+        val settingsBuilder = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            settingsBuilder
+                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
         }
 
-        scheduleWatchdog(parsedUuid)
-        if (canAdvertise) {
-            scheduleAdvertisePulses(parsedUuid, major, minor)
-        } else {
-            emit(mapOf("type" to "androidBleMode", "mode" to "scanOnly", "platform" to "android"))
+        val filters = listOf(
+            ScanFilter.Builder()
+                .setServiceUuid(ParcelUuid(serviceUuid))
+                .build()
+        )
+
+        scanCallback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                handleScanResult(result)
+            }
+
+            override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                results.forEach { handleScanResult(it) }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                emit(mapOf(
+                    "type" to "scanFailed",
+                    "transport" to "ble_gatt",
+                    "platform" to "android",
+                    "errorCode" to errorCode
+                ))
+            }
         }
 
-        result.success(true)
+        return try {
+            bleScanner.startScan(filters, settingsBuilder.build(), scanCallback)
+            emit(mapOf("type" to "scanStarted", "transport" to "ble_gatt", "platform" to "android"))
+            true
+        } catch (e: Exception) {
+            emit(mapOf("type" to "scanException", "platform" to "android", "error" to e.message))
+            false
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleScanResult(result: ScanResult) {
+        if (!isStarted) return
+        if (!hasConnectPermission()) return
+
+        val device = result.device ?: return
+        val address = device.address ?: return
+        val now = System.currentTimeMillis()
+
+        if (now - (lastReadAt[address] ?: 0L) < readThrottleMs) return
+        if (activeGatts.containsKey(address)) return
+
+        resultRssi[address] = result.rssi
+
+        try {
+            val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                device.connectGatt(activity, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            } else {
+                device.connectGatt(activity, false, gattCallback)
+            }
+            if (gatt != null) activeGatts[address] = gatt
+        } catch (e: Exception) {
+            emit(mapOf("type" to "connectException", "platform" to "android", "error" to e.message))
+        }
+    }
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            val address = gatt.device.address
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                closeGatt(address, gatt)
+                return
+            }
+
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                gatt.discoverServices()
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                closeGatt(address, gatt)
+            }
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                closeGatt(gatt.device.address, gatt)
+                return
+            }
+
+            val characteristic = gatt
+                .getService(serviceUuid)
+                ?.getCharacteristic(tokenCharacteristicUuid)
+
+            if (characteristic == null) {
+                closeGatt(gatt.device.address, gatt)
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.readCharacteristic(characteristic)
+            } else {
+                @Suppress("DEPRECATION")
+                gatt.readCharacteristic(characteristic)
+            }
+        }
+
+        @Deprecated("Deprecated in Android 13, kept for API compatibility")
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            @Suppress("DEPRECATION")
+            handleCharacteristicRead(gatt, characteristic.uuid, characteristic.value, status)
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int
+        ) {
+            handleCharacteristicRead(gatt, characteristic.uuid, value, status)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleCharacteristicRead(
+        gatt: BluetoothGatt,
+        characteristicUuid: UUID,
+        value: ByteArray?,
+        status: Int
+    ) {
+        val address = gatt.device.address
+        if (status == BluetoothGatt.GATT_SUCCESS && characteristicUuid == tokenCharacteristicUuid) {
+            val token = if (value != null) String(value, Charsets.UTF_8).trim() else ""
+            if (token.isNotEmpty() && token != currentToken) {
+                lastReadAt[address] = System.currentTimeMillis()
+                emit(mapOf(
+                    "type" to "gattPeer",
+                    "transport" to "ble_gatt",
+                    "platform" to "android",
+                    "token" to token,
+                    "rssi" to (resultRssi[address] ?: -90)
+                ))
+            }
+        }
+        closeGatt(address, gatt)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun closeGatt(address: String, gatt: BluetoothGatt) {
+        activeGatts.remove(address)
+        try { gatt.disconnect() } catch (_: Exception) {}
+        try { gatt.close() } catch (_: Exception) {}
+    }
+
+    private fun emit(payload: Map<String, Any?>) {
+        mainHandler.post { eventSink?.success(payload) }
     }
 
     private fun hasScanPermissions(): Boolean {
-        val fineLocationOk = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        val locationOk = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            fineLocationOk &&
-                hasPermission(Manifest.permission.BLUETOOTH_SCAN) &&
-                hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
+            hasPermission(Manifest.permission.BLUETOOTH_SCAN) &&
+                hasPermission(Manifest.permission.BLUETOOTH_CONNECT) &&
+                locationOk
         } else {
-            fineLocationOk
+            locationOk
         }
+    }
+
+    private fun hasConnectPermission(): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+            hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
     }
 
     private fun hasAdvertisePermission(): Boolean {
@@ -185,15 +496,6 @@ class ProxiMeetBeaconPlugin(
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) missing.add("BLUETOOTH_CONNECT")
         }
         return "Permessi scan mancanti: ${missing.joinToString(", ")}"
-    }
-
-    private fun advertiseUnavailableReason(bluetoothAdapter: BluetoothAdapter): String {
-        return when {
-            !hasAdvertisePermission() -> "BLUETOOTH_ADVERTISE permission missing"
-            advertiser == null -> "BluetoothLeAdvertiser null"
-            !bluetoothAdapter.isMultipleAdvertisementSupported -> "multiple advertisement unsupported"
-            else -> "unknown"
-        }
     }
 
     private fun hasPermission(permission: String): Boolean =
@@ -213,332 +515,10 @@ class ProxiMeetBeaconPlugin(
         }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun startScanning(uuid: UUID, filtered: Boolean): Boolean {
-        stopScanningOnly()
-
-        val settingsBuilder = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .setReportDelay(0)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            settingsBuilder
-                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            settingsBuilder.setLegacy(true)
-        }
-
-        val settings = settingsBuilder.build()
-        val filters: List<ScanFilter>? = if (filtered) {
-            listOf(
-                ScanFilter.Builder()
-                    .setManufacturerData(
-                        APPLE_COMPANY_ID,
-                        byteArrayOf(0x02, 0x15),
-                        byteArrayOf(0xFF.toByte(), 0xFF.toByte())
-                    )
-                    .build()
-            )
-        } else {
-            null
-        }
-
-        rawCallbacksInWindow = 0
-        iBeaconCandidatesInWindow = 0
-        matchingBeaconsInWindow = 0
-        scanMode = if (filtered) "filtered" else "unfiltered"
-
-        scanCallback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                rawCallbacksInWindow++
-                parseIBeacon(result, uuid)?.let { emit(it) }
-            }
-
-            override fun onBatchScanResults(results: MutableList<ScanResult>) {
-                rawCallbacksInWindow += results.size
-                results.forEach { result ->
-                    parseIBeacon(result, uuid)?.let { emit(it) }
-                }
-            }
-
-            override fun onScanFailed(errorCode: Int) {
-                emit(mapOf("type" to "scanError", "code" to errorCode, "platform" to "android"))
-            }
-        }
-
-        return try {
-            scanner?.startScan(filters, settings, scanCallback)
-            emit(mapOf("type" to "scanStarted", "mode" to scanMode, "platform" to "android"))
-            true
-        } catch (e: Exception) {
-            emit(mapOf("type" to "scanError", "code" to "EXCEPTION", "message" to (e.message ?: e.javaClass.simpleName), "platform" to "android"))
-            scanMode = "stopped"
-            false
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startAdvertising(uuid: UUID, major: Int, minor: Int) {
-        stopAdvertisingOnly()
-
-        if (!hasAdvertisePermission()) {
-            emit(mapOf("type" to "advertiseError", "code" to "NO_ADVERTISE_PERMISSION", "platform" to "android"))
-            return
-        }
-
-        val a = advertiser ?: return
-        val payload = buildIBeaconPayload(uuid, major, minor, DEFAULT_TX_POWER)
-
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-            .setConnectable(false)
-            .setTimeout(0)
-            .build()
-
-        val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(false)
-            .setIncludeTxPowerLevel(false)
-            .addManufacturerData(APPLE_COMPANY_ID, payload)
-            .build()
-
-        advertiseCallback = object : AdvertiseCallback() {
-            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                emit(mapOf("type" to "advertiseStarted", "mode" to "pulse", "platform" to "android"))
-            }
-
-            override fun onStartFailure(errorCode: Int) {
-                emit(mapOf("type" to "advertiseError", "code" to errorCode, "platform" to "android"))
-            }
-        }
-
-        try {
-            a.startAdvertising(settings, data, advertiseCallback)
-        } catch (e: Exception) {
-            emit(mapOf("type" to "advertiseError", "code" to "EXCEPTION", "message" to (e.message ?: e.javaClass.simpleName), "platform" to "android"))
-        }
-    }
-
-    private fun scheduleAdvertisePulses(uuid: UUID, major: Int, minor: Int) {
-        cycleRunnable?.let { mainHandler.removeCallbacks(it) }
-
-        val offset = computeDeterministicOffsetMs(major, minor)
-
-        val runnable = object : Runnable {
-            override fun run() {
-                if (expectedUuid == null) return
-
-                stopScanningOnly()
-                startAdvertising(uuid, major, minor)
-
-                mainHandler.postDelayed({
-                    stopAdvertisingOnly()
-                    if (expectedUuid != null) {
-                        startScanning(uuid, filtered = false)
-                    }
-                }, ADVERTISE_PULSE_MS)
-
-                mainHandler.postDelayed(this, ANDROID_CYCLE_MS)
-            }
-        }
-
-        cycleRunnable = runnable
-        mainHandler.postDelayed(runnable, offset)
-
-        emit(
-            mapOf(
-                "type" to "androidBleMode",
-                "mode" to "timeSlicedScanDominant",
-                "cycleMs" to ANDROID_CYCLE_MS,
-                "advertisePulseMs" to ADVERTISE_PULSE_MS,
-                "firstAdvertiseOffsetMs" to offset,
-                "platform" to "android"
-            )
-        )
-    }
-
-    private fun scheduleWatchdog(uuid: UUID) {
-        watchdogRunnable?.let { mainHandler.removeCallbacks(it) }
-
-        val runnable = object : Runnable {
-            override fun run() {
-                if (expectedUuid == null) return
-
-                emit(
-                    mapOf(
-                        "type" to "scanWatchdog",
-                        "mode" to scanMode,
-                        "rawCallbacks" to rawCallbacksInWindow,
-                        "iBeaconCandidates" to iBeaconCandidatesInWindow,
-                        "matchingBeacons" to matchingBeaconsInWindow,
-                        "platform" to "android"
-                    )
-                )
-
-                if (rawCallbacksInWindow == 0) {
-                    emit(mapOf("type" to "scanRestart", "reason" to "noCallbacks", "platform" to "android"))
-                    startScanning(uuid, filtered = false)
-                } else {
-                    rawCallbacksInWindow = 0
-                    iBeaconCandidatesInWindow = 0
-                    matchingBeaconsInWindow = 0
-                }
-
-                mainHandler.postDelayed(this, WATCHDOG_MS)
-            }
-        }
-
-        watchdogRunnable = runnable
-        mainHandler.postDelayed(runnable, WATCHDOG_MS)
-    }
-
-    private fun computeDeterministicOffsetMs(major: Int, minor: Int): Long {
-        val maxOffset = max(0L, ANDROID_CYCLE_MS - ADVERTISE_PULSE_MS - 500L)
-        val hash = ((major * 1103515245L) + minor + 12345L).let { if (it < 0) -it else it }
-        return min(maxOffset, hash % max(1L, maxOffset))
-    }
-
-    // FIX ANDROID CHE IGNORAVA IOS 
-    private fun extractIBeaconBytes(result: ScanResult): ByteArray? {
-        val rawBytes = result.scanRecord?.bytes ?: return null
-        var offset = 0
-
-        while (offset < rawBytes.size) {
-            val length = rawBytes[offset].toInt() and 0xFF
-            if (length == 0) break
-            if (offset + length >= rawBytes.size) break
-
-            val adType = rawBytes[offset + 1].toInt() and 0xFF
-            if (adType == 0xFF && length >= 5) {
-                val companyIdLow = rawBytes[offset + 2].toInt() and 0xFF
-                val companyIdHigh = rawBytes[offset + 3].toInt() and 0xFF
-                val companyId = (companyIdHigh shl 8) or companyIdLow
-
-                if (companyId == APPLE_COMPANY_ID) {
-                    val dataStart = offset + 4
-                    val dataLength = length - 3
-                    if (dataLength >= 2 && rawBytes[dataStart] == 0x02.toByte() && rawBytes[dataStart + 1] == 0x15.toByte()) {
-                        if (dataLength >= IBEACON_PAYLOAD_LENGTH) {
-                            return rawBytes.copyOfRange(dataStart, dataStart + dataLength)
-                        }
-                    }
-                }
-            }
-            offset += length + 1
-        }
-        return null
-    }
-
-    private fun parseIBeacon(result: ScanResult, expectedUuid: UUID): Map<String, Any>? {
-        val bytes = extractIBeaconBytes(result) ?: return null
-
-        iBeaconCandidatesInWindow++
-
-        val uuidBuffer = ByteBuffer.wrap(bytes, 2, 16)
-        val foundUuid = UUID(uuidBuffer.long, uuidBuffer.long)
-        if (foundUuid != expectedUuid) return null
-        matchingBeaconsInWindow++
-
-        val major = ((bytes[18].toInt() and 0xFF) shl 8) or (bytes[19].toInt() and 0xFF)
-        val minor = ((bytes[20].toInt() and 0xFF) shl 8) or (bytes[21].toInt() and 0xFF)
-
-        val rawRssi = result.rssi
-        if (rawRssi == 0 || rawRssi < -105) return null
-
-        val key = "${major}_${minor}"
-        val previous = rssiSmoothed[key]
-        val smoothed = if (previous == null) {
-            rawRssi.toFloat()
-        } else {
-            EWMA_ALPHA * rawRssi.toFloat() + (1f - EWMA_ALPHA) * previous
-        }
-        rssiSmoothed[key] = smoothed
-
-        val now = System.currentTimeMillis()
-        val last = lastEmitAt[key] ?: 0L
-        if (now - last < MIN_EMIT_INTERVAL_MS) return null
-        lastEmitAt[key] = now
-
-        return mapOf(
-            "type" to "beacon",
-            "major" to major,
-            "minor" to minor,
-            "rssi" to smoothed.toInt(),
-            "platform" to "android"
-        )
-    }
-
-    private fun buildIBeaconPayload(uuid: UUID, major: Int, minor: Int, txPower: Int): ByteArray {
-        val buffer = ByteBuffer.allocate(IBEACON_PAYLOAD_LENGTH)
-        buffer.put(0x02.toByte())
-        buffer.put(0x15.toByte())
-        buffer.putLong(uuid.mostSignificantBits)
-        buffer.putLong(uuid.leastSignificantBits)
-        buffer.put(((major shr 8) and 0xFF).toByte())
-        buffer.put((major and 0xFF).toByte())
-        buffer.put(((minor shr 8) and 0xFF).toByte())
-        buffer.put((minor and 0xFF).toByte())
-        buffer.put(txPower.toByte())
-        return buffer.array()
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopScanningOnly() {
-        try { scanCallback?.let { scanner?.stopScan(it) } } catch (_: Exception) {}
-        scanCallback = null
-        scanMode = "stopped"
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopAdvertisingOnly() {
-        try { advertiseCallback?.let { advertiser?.stopAdvertising(it) } } catch (_: Exception) {}
-        advertiseCallback = null
-    }
-
-    @SuppressLint("MissingPermission")
-    fun stop() {
-        cycleRunnable?.let { mainHandler.removeCallbacks(it) }
-        watchdogRunnable?.let { mainHandler.removeCallbacks(it) }
-        cycleRunnable = null
-        watchdogRunnable = null
-
-        stopAdvertisingOnly()
-        stopScanningOnly()
-
-        advertiser = null
-        scanner = null
-        expectedUuid = null
-        myMajor = -1
-        myMinor = -1
-        filteredScanFailedOnce = false
-        rawCallbacksInWindow = 0
-        iBeaconCandidatesInWindow = 0
-        matchingBeaconsInWindow = 0
-        rssiSmoothed.clear()
-        lastEmitAt.clear()
-    }
-
-    private fun emit(payload: Map<String, Any>) {
-        mainHandler.post {
-            eventSink?.success(payload)
-        }
-    }
-
     companion object {
         private const val METHOD_CHANNEL = "proximeet/beacon"
         private const val EVENT_CHANNEL = "proximeet/beacon_events"
-        private const val APPLE_COMPANY_ID = 0x004C
-        private const val IBEACON_PAYLOAD_LENGTH = 23
-        private const val DEFAULT_TX_POWER = -59
-        private const val EWMA_ALPHA = 0.25f
-        private const val MIN_EMIT_INTERVAL_MS = 800L
-
-        private const val WATCHDOG_MS = 5000L
-        private const val ANDROID_CYCLE_MS = 12000L
-        private const val ADVERTISE_PULSE_MS = 2200L
+        private val DEFAULT_SERVICE_UUID: UUID = UUID.fromString("F2703C30-FA18-4173-8599-016070383C81")
+        private val DEFAULT_TOKEN_CHARACTERISTIC_UUID: UUID = UUID.fromString("F2703C31-FA18-4173-8599-016070383C81")
     }
 }
