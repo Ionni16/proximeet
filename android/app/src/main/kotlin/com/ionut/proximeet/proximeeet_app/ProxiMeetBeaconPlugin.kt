@@ -203,7 +203,8 @@ class ProxiMeetBeaconPlugin(
             )
         }
 
-        val scanOk = startScanning(parsedUuid, filtered = true)
+        useFilteredScan = false
+        val scanOk = startScanning(parsedUuid, filtered = false)
         if (!scanOk) {
             result.error("SCAN_START_FALSE", "Lo scan BLE non è partito", null)
             return
@@ -331,13 +332,21 @@ class ProxiMeetBeaconPlugin(
         scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 rawCallbacksInWindow++
-                parseIBeacon(result, uuid)?.let { emit(it) }
+
+                parseIBeacon(result, uuid)?.let {
+                    emit(it)
+                    return
+                }
+
+                parseIosServiceBeacon(result)?.let { emit(it) }
             }
 
             override fun onBatchScanResults(results: MutableList<ScanResult>) {
                 rawCallbacksInWindow += results.size
+
                 results.forEach { result ->
-                    parseIBeacon(result, uuid)?.let { emit(it) }
+                    val event = parseIBeacon(result, uuid) ?: parseIosServiceBeacon(result)
+                    event?.let { emit(it) }
                 }
             }
 
@@ -721,6 +730,69 @@ class ProxiMeetBeaconPlugin(
         )
     }
 
+    private fun parseIosServiceBeacon(result: ScanResult): Map<String, Any>? {
+        val serviceUuids = result.scanRecord?.serviceUuids ?: return null
+
+        for (parcelUuid in serviceUuids) {
+            val uuidString = parcelUuid.uuid.toString().lowercase()
+
+            if (!uuidString.startsWith(IOS_SERVICE_PREFIX)) continue
+            if (!uuidString.endsWith(IOS_SERVICE_SUFFIX)) continue
+
+            val tail = uuidString.substringAfterLast("-")
+            if (tail.length != 12) continue
+
+            val majorHex = tail.substring(0, 4)
+            val minorHex = tail.substring(4, 8)
+
+            val major = try {
+                majorHex.toInt(16)
+            } catch (_: Exception) {
+                continue
+            }
+
+            val minor = try {
+                minorHex.toInt(16)
+            } catch (_: Exception) {
+                continue
+            }
+
+            val rawRssi = result.rssi
+            if (rawRssi == 0 || rawRssi < -105) return null
+
+            val key = "${major}_${minor}"
+            val previous = rssiSmoothed[key]
+
+            val smoothed = if (previous == null) {
+                rawRssi.toFloat()
+            } else {
+                EWMA_ALPHA * rawRssi.toFloat() + (1f - EWMA_ALPHA) * previous
+            }
+
+            rssiSmoothed[key] = smoothed
+
+            val now = System.currentTimeMillis()
+            val last = lastEmitAt[key] ?: 0L
+
+            if (now - last < MIN_EMIT_INTERVAL_MS) return null
+
+            lastEmitAt[key] = now
+
+            return mapOf(
+                "type" to "beacon",
+                "major" to major,
+                "minor" to minor,
+                "rssi" to smoothed.toInt(),
+                "rawRssi" to rawRssi,
+                "source" to "ios_service_uuid",
+                "serviceUuid" to uuidString,
+                "platform" to "android"
+            )
+        }
+
+        return null
+    }
+
     private fun buildIBeaconPayload(
         uuid: UUID,
         major: Int,
@@ -831,6 +903,9 @@ class ProxiMeetBeaconPlugin(
         private const val APPLE_COMPANY_ID = 0x004C
         private const val IBEACON_PAYLOAD_LENGTH = 23
         private const val DEFAULT_TX_POWER = -59
+
+        private const val IOS_SERVICE_PREFIX = "f2713c30-fa18-4173-8599-"
+        private const val IOS_SERVICE_SUFFIX = "3c81"
 
         private const val EWMA_ALPHA = 0.25f
         private const val MIN_EMIT_INTERVAL_MS = 800L

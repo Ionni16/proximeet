@@ -110,7 +110,10 @@ final class ProxiMeetBeaconPlugin: NSObject,
   private var rxRegion: CLBeaconRegion?
   private var txRegion: CLBeaconRegion?
 
-  private var advertisingPayload: [String: Any]?
+  private var iBeaconPayload: [String: Any]?
+  private var serviceUuidPayload: [String: Any]?
+  private var activeAdvertisingPayload: [String: Any]?
+
   private var eventSink: FlutterEventSink?
 
   private var ownMajor: CLBeaconMajorValue = 0
@@ -121,6 +124,10 @@ final class ProxiMeetBeaconPlugin: NSObject,
   private var isRanging = false
   private var isAdvertising = false
 
+  private var advertisingMode = "stopped"
+  private var advertisingCycleTimer: Timer?
+  private var stateReportTimer: Timer?
+
   private let regionIdentifier = "com.ionut.proximeet.proximeeet_app.ibeacon"
 
   private var rssiSmoothed: [String: Double] = [:]
@@ -130,7 +137,9 @@ final class ProxiMeetBeaconPlugin: NSObject,
   private let minEmitInterval: TimeInterval = 0.8
   private let minValidRssi = -100
 
-  private var stateReportTimer: Timer?
+  // Più stabile: iPhone resta più tempo in iBeacon per compatibilità iPhone↔iPhone.
+  private let iBeaconWindowSeconds: TimeInterval = 6.0
+  private let serviceWindowSeconds: TimeInterval = 2.0
 
   func start(
     uuidString: String,
@@ -195,7 +204,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
       ])
 
       ensureRangingRunning()
-      ensureAdvertisingRunning()
+      startAdvertisingCycle()
       result(true)
       return
     }
@@ -205,6 +214,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
     isStarted = true
     isAdvertising = false
     isRanging = false
+    advertisingMode = "stopped"
 
     currentUuid = uuid
     ownMajor = CLBeaconMajorValue(major)
@@ -247,10 +257,11 @@ final class ProxiMeetBeaconPlugin: NSObject,
     let measuredPower = NSNumber(value: -59)
 
     if let payload = tx.peripheralData(withMeasuredPower: measuredPower) as? [String: Any] {
-      advertisingPayload = payload
+      iBeaconPayload = payload
 
       emit([
         "type": "advertisePayloadCreated",
+        "mode": "ibeacon",
         "uuid": uuid.uuidString,
         "major": major,
         "minor": minor,
@@ -258,14 +269,32 @@ final class ProxiMeetBeaconPlugin: NSObject,
         "platform": "ios"
       ])
     } else {
-      advertisingPayload = nil
+      iBeaconPayload = nil
 
       emit([
         "type": "advertiseError",
+        "mode": "ibeacon",
         "message": "Cast payload iBeacon fallito",
         "platform": "ios"
       ])
     }
+
+    let iosServiceUuid = makeIosServiceUuid(major: major, minor: minor)
+
+    serviceUuidPayload = [
+      CBAdvertisementDataServiceUUIDsKey: [iosServiceUuid]
+    ]
+
+    emit([
+      "type": "advertisePayloadCreated",
+      "mode": "ios_service_uuid",
+      "uuid": uuid.uuidString,
+      "major": major,
+      "minor": minor,
+      "serviceUuid": iosServiceUuid.uuidString,
+      "payloadKeys": serviceUuidPayload?.keys.map { "\($0)" }.joined(separator: ",") ?? "",
+      "platform": "ios"
+    ])
 
     peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
 
@@ -325,6 +354,13 @@ final class ProxiMeetBeaconPlugin: NSObject,
     result(true)
   }
 
+  private func makeIosServiceUuid(major: Int, minor: Int) -> CBUUID {
+    let majorHex = String(format: "%04x", major)
+    let minorHex = String(format: "%04x", minor)
+    let uuidString = "f2713c30-fa18-4173-8599-\(majorHex)\(minorHex)3c81"
+    return CBUUID(string: uuidString)
+  }
+
   func applicationDidBecomeActive() {
     guard isStarted else { return }
 
@@ -334,7 +370,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
     ])
 
     ensureRangingRunning()
-    ensureAdvertisingRunning()
+    startAdvertisingCycle()
   }
 
   func applicationWillResignActive() {
@@ -342,7 +378,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
 
     emit([
       "type": "applicationWillResignActive",
-      "note": "iOS può limitare o sospendere advertising iBeacon se l'app non resta in foreground.",
+      "note": "iOS può limitare advertising BLE/iBeacon se l'app non resta in foreground.",
       "platform": "ios"
     ])
   }
@@ -353,12 +389,14 @@ final class ProxiMeetBeaconPlugin: NSObject,
 
   private func stopInternal(keepEventSink: Bool) {
     stopStateReportTimer()
+    stopAdvertisingCycle()
 
     if let pm = peripheralManager {
       pm.stopAdvertising()
     }
 
     isAdvertising = false
+    advertisingMode = "stopped"
     peripheralManager = nil
 
     if let manager = locationManager {
@@ -387,7 +425,11 @@ final class ProxiMeetBeaconPlugin: NSObject,
 
     rxRegion = nil
     txRegion = nil
-    advertisingPayload = nil
+
+    iBeaconPayload = nil
+    serviceUuidPayload = nil
+    activeAdvertisingPayload = nil
+
     currentUuid = nil
     isStarted = false
 
@@ -451,11 +493,93 @@ final class ProxiMeetBeaconPlugin: NSObject,
     ])
   }
 
-  private func ensureAdvertisingRunning() {
+  private func startAdvertisingCycle() {
+    guard isStarted else { return }
+    guard peripheralManager?.state == .poweredOn else {
+      emit([
+        "type": "advertisingCycleNotReady",
+        "reason": "bluetoothNotPoweredOn",
+        "bluetoothState": peripheralManager?.state.rawValue ?? -1,
+        "platform": "ios"
+      ])
+      return
+    }
+
+    stopAdvertisingCycle()
+    switchToIBeaconAdvertising()
+  }
+
+  private func stopAdvertisingCycle() {
+    advertisingCycleTimer?.invalidate()
+    advertisingCycleTimer = nil
+  }
+
+  private func scheduleNextIBeaconWindow() {
+    stopAdvertisingCycle()
+
+    advertisingCycleTimer = Timer.scheduledTimer(withTimeInterval: serviceWindowSeconds, repeats: false) {
+      [weak self] _ in
+      self?.switchToIBeaconAdvertising()
+    }
+
+    if let timer = advertisingCycleTimer {
+      RunLoop.main.add(timer, forMode: .common)
+    }
+  }
+
+  private func scheduleNextServiceWindow() {
+    stopAdvertisingCycle()
+
+    advertisingCycleTimer = Timer.scheduledTimer(withTimeInterval: iBeaconWindowSeconds, repeats: false) {
+      [weak self] _ in
+      self?.switchToServiceAdvertising()
+    }
+
+    if let timer = advertisingCycleTimer {
+      RunLoop.main.add(timer, forMode: .common)
+    }
+  }
+
+  private func switchToIBeaconAdvertising() {
+    guard let payload = iBeaconPayload else {
+      emit([
+        "type": "advertisingSwitchSkipped",
+        "mode": "ibeacon",
+        "reason": "payloadNil",
+        "platform": "ios"
+      ])
+
+      switchToServiceAdvertising()
+      return
+    }
+
+    startAdvertising(payload: payload, mode: "ibeacon")
+    scheduleNextServiceWindow()
+  }
+
+  private func switchToServiceAdvertising() {
+    guard let payload = serviceUuidPayload else {
+      emit([
+        "type": "advertisingSwitchSkipped",
+        "mode": "ios_service_uuid",
+        "reason": "payloadNil",
+        "platform": "ios"
+      ])
+
+      switchToIBeaconAdvertising()
+      return
+    }
+
+    startAdvertising(payload: payload, mode: "ios_service_uuid")
+    scheduleNextIBeaconWindow()
+  }
+
+  private func startAdvertising(payload: [String: Any], mode: String) {
     guard isStarted else {
       emit([
         "type": "advertiseNotReady",
         "reason": "notStarted",
+        "mode": mode,
         "platform": "ios"
       ])
       return
@@ -465,6 +589,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
       emit([
         "type": "advertiseNotReady",
         "reason": "peripheralManagerNil",
+        "mode": mode,
         "platform": "ios"
       ])
       return
@@ -475,43 +600,30 @@ final class ProxiMeetBeaconPlugin: NSObject,
         "type": "advertiseNotReady",
         "reason": "bluetoothNotPoweredOn",
         "bluetoothState": pm.state.rawValue,
-        "platform": "ios"
-      ])
-      return
-    }
-
-    guard let payload = advertisingPayload else {
-      emit([
-        "type": "advertiseNotReady",
-        "reason": "payloadNil",
-        "platform": "ios"
-      ])
-      return
-    }
-
-    if isAdvertising {
-      emit([
-        "type": "advertiseAlreadyRunning",
+        "mode": mode,
         "platform": "ios"
       ])
       return
     }
 
     pm.stopAdvertising()
+
     isAdvertising = false
+    advertisingMode = mode
+    activeAdvertisingPayload = payload
 
     emit([
       "type": "advertiseStartRequested",
+      "mode": mode,
       "payloadKeys": payload.keys.map { "\($0)" }.joined(separator: ","),
       "platform": "ios"
     ])
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
       guard let self else { return }
       guard self.isStarted else { return }
       guard let pm = self.peripheralManager else { return }
       guard pm.state == .poweredOn else { return }
-      guard let payload = self.advertisingPayload else { return }
 
       pm.startAdvertising(payload)
     }
@@ -532,16 +644,23 @@ final class ProxiMeetBeaconPlugin: NSObject,
         } ?? -1,
         "isRanging": self.isRanging,
         "isAdvertising": self.isAdvertising,
-        "hasPayload": self.advertisingPayload != nil,
+        "advertisingMode": self.advertisingMode,
+        "hasIBeaconPayload": self.iBeaconPayload != nil,
+        "hasServicePayload": self.serviceUuidPayload != nil,
         "isStarted": self.isStarted,
         "platform": "ios"
       ])
 
       self.ensureRangingRunning()
-      self.ensureAdvertisingRunning()
+
+      if self.peripheralManager?.state == .poweredOn, !self.isAdvertising {
+        self.startAdvertisingCycle()
+      }
     }
 
-    RunLoop.main.add(stateReportTimer!, forMode: .common)
+    if let timer = stateReportTimer {
+      RunLoop.main.add(timer, forMode: .common)
+    }
   }
 
   private func stopStateReportTimer() {
@@ -564,7 +683,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
       ])
 
       isAdvertising = false
-      ensureAdvertisingRunning()
+      startAdvertisingCycle()
 
     case .poweredOff:
       emit([
@@ -612,19 +731,20 @@ final class ProxiMeetBeaconPlugin: NSObject,
 
       emit([
         "type": "advertiseError",
+        "mode": advertisingMode,
         "message": error.localizedDescription,
         "platform": "ios"
       ])
 
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-        self?.ensureAdvertisingRunning()
+        self?.startAdvertisingCycle()
       }
     } else {
       isAdvertising = true
 
       emit([
         "type": "advertiseStarted",
-        "mode": "ibeacon",
+        "mode": advertisingMode,
         "platform": "ios"
       ])
     }
