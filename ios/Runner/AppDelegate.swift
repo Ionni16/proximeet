@@ -1,11 +1,9 @@
 import Flutter
 import UIKit
 import CoreBluetooth
-import CoreLocation
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
-
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -19,27 +17,20 @@ import CoreLocation
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
-  override func applicationDidBecomeActive(_ application: UIApplication) {
-    super.applicationDidBecomeActive(application)
-    ProxiMeetBeaconPlugin.shared.applicationDidBecomeActive()
-  }
-
-  override func applicationWillResignActive(_ application: UIApplication) {
-    super.applicationWillResignActive(application)
-    ProxiMeetBeaconPlugin.shared.applicationWillResignActive()
-  }
-
   override func applicationWillTerminate(_ application: UIApplication) {
     ProxiMeetBeaconPlugin.shared.stop()
     super.applicationWillTerminate(application)
   }
 }
 
+/// BLE GATT bidirezionale:
+/// - Peripheral/GATT server: pubblica un Service UUID fisso e una characteristic leggibile con token temporaneo.
+/// - Central/GATT client: scansiona lo stesso Service UUID, si connette e legge la characteristic token.
 final class ProxiMeetBeaconPlugin: NSObject,
                                     FlutterStreamHandler,
-                                    CLLocationManagerDelegate,
-                                    CBPeripheralManagerDelegate {
-
+                                    CBPeripheralManagerDelegate,
+                                    CBCentralManagerDelegate,
+                                    CBPeripheralDelegate {
   static let shared = ProxiMeetBeaconPlugin()
 
   static func register(with messenger: FlutterBinaryMessenger) {
@@ -56,26 +47,23 @@ final class ProxiMeetBeaconPlugin: NSObject,
     methodChannel.setMethodCallHandler { call, result in
       switch call.method {
       case "start":
-        guard
-          let args = call.arguments as? [String: Any],
-          let uuidString = args["uuid"] as? String,
-          let major = args["major"] as? Int,
-          let minor = args["minor"] as? Int
-        else {
-          result(
-            FlutterError(
-              code: "BAD_ARGS",
-              message: "uuid, major e minor sono obbligatori",
-              details: call.arguments
-            )
-          )
+        guard let args = call.arguments as? [String: Any] else {
+          result(FlutterError(code: "BAD_ARGS", message: "Argomenti mancanti", details: call.arguments))
+          return
+        }
+
+        let serviceUuid = (args["serviceUuid"] as? String) ?? "F2703C30-FA18-4173-8599-016070383C81"
+        let characteristicUuid = (args["tokenCharacteristicUuid"] as? String) ?? "F2703C31-FA18-4173-8599-016070383C81"
+
+        guard let token = args["token"] as? String, !token.isEmpty else {
+          result(FlutterError(code: "BAD_TOKEN", message: "token obbligatorio", details: call.arguments))
           return
         }
 
         ProxiMeetBeaconPlugin.shared.start(
-          uuidString: uuidString,
-          major: major,
-          minor: minor,
+          serviceUuidString: serviceUuid,
+          characteristicUuidString: characteristicUuid,
+          token: token,
           result: result
         )
 
@@ -91,10 +79,23 @@ final class ProxiMeetBeaconPlugin: NSObject,
     eventChannel.setStreamHandler(ProxiMeetBeaconPlugin.shared)
   }
 
-  func onListen(
-    withArguments arguments: Any?,
-    eventSink events: @escaping FlutterEventSink
-  ) -> FlutterError? {
+  private var eventSink: FlutterEventSink?
+
+  private var peripheralManager: CBPeripheralManager?
+  private var centralManager: CBCentralManager?
+
+  private var serviceUuid: CBUUID?
+  private var tokenCharacteristicUuid: CBUUID?
+  private var currentTokenData: Data?
+  private var isStarted = false
+
+  private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+  private var peripheralRssi: [UUID: Int] = [:]
+  private var lastReadAt: [UUID: TimeInterval] = [:]
+
+  private let readThrottleSeconds: TimeInterval = 3.0
+
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
     return nil
   }
@@ -104,826 +105,250 @@ final class ProxiMeetBeaconPlugin: NSObject,
     return nil
   }
 
-  private var locationManager: CLLocationManager?
-  private var peripheralManager: CBPeripheralManager?
-
-  private var rxRegion: CLBeaconRegion?
-  private var txRegion: CLBeaconRegion?
-
-  private var iBeaconPayload: [String: Any]?
-  private var serviceUuidPayload: [String: Any]?
-  private var activeAdvertisingPayload: [String: Any]?
-
-  private var eventSink: FlutterEventSink?
-
-  private var ownMajor: CLBeaconMajorValue = 0
-  private var ownMinor: CLBeaconMinorValue = 0
-  private var currentUuid: UUID?
-
-  private var isStarted = false
-  private var isRanging = false
-  private var isAdvertising = false
-
-  private var advertisingMode = "stopped"
-  private var advertisingCycleTimer: Timer?
-  private var stateReportTimer: Timer?
-
-  private let regionIdentifier = "com.ionut.proximeet.proximeeet_app.ibeacon"
-
-  private var rssiSmoothed: [String: Double] = [:]
-  private var lastEmitAt: [String: TimeInterval] = [:]
-
-  private let ewmaAlpha: Double = 0.25
-  private let minEmitInterval: TimeInterval = 0.8
-  private let minValidRssi = -100
-
-  // Più stabile: iPhone resta più tempo in iBeacon per compatibilità iPhone↔iPhone.
-  private let iBeaconWindowSeconds: TimeInterval = 6.0
-  private let serviceWindowSeconds: TimeInterval = 2.0
-
   func start(
-    uuidString: String,
-    major: Int,
-    minor: Int,
+    serviceUuidString: String,
+    characteristicUuidString: String,
+    token: String,
     result: @escaping FlutterResult
   ) {
-    guard let uuid = UUID(uuidString: uuidString) else {
-      result(
-        FlutterError(
-          code: "BAD_UUID",
-          message: "UUID iBeacon non valido",
-          details: uuidString
-        )
-      )
+    guard UUID(uuidString: serviceUuidString) != nil else {
+      result(FlutterError(code: "BAD_SERVICE_UUID", message: "Service UUID non valido", details: serviceUuidString))
+      return
+    }
+    guard UUID(uuidString: characteristicUuidString) != nil else {
+      result(FlutterError(code: "BAD_CHARACTERISTIC_UUID", message: "Characteristic UUID non valido", details: characteristicUuidString))
+      return
+    }
+    guard let data = token.data(using: .utf8), data.count <= 180 else {
+      result(FlutterError(code: "BAD_TOKEN", message: "Token non valido o troppo lungo", details: token.count))
       return
     }
 
-    guard (0...65535).contains(major), (0...65535).contains(minor) else {
-      result(
-        FlutterError(
-          code: "BAD_MAJOR_MINOR",
-          message: "major/minor devono essere 0...65535",
-          details: ["major": major, "minor": minor]
-        )
-      )
-      return
-    }
+    stopInternal(emitStopped: false)
 
-    guard CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) else {
-      result(
-        FlutterError(
-          code: "BEACON_UNSUPPORTED",
-          message: "Dispositivo non supporta iBeacon monitoring.",
-          details: nil
-        )
-      )
-      return
-    }
-
-    guard CLLocationManager.locationServicesEnabled() else {
-      result(
-        FlutterError(
-          code: "LOCATION_SERVICES_OFF",
-          message: "Servizi di localizzazione disattivati a livello di sistema.",
-          details: nil
-        )
-      )
-      return
-    }
-
-    if isStarted,
-       currentUuid == uuid,
-       Int(ownMajor) == major,
-       Int(ownMinor) == minor {
-      emit([
-        "type": "startAlreadyRunning",
-        "uuid": uuid.uuidString,
-        "major": major,
-        "minor": minor,
-        "platform": "ios"
-      ])
-
-      ensureRangingRunning()
-      startAdvertisingCycle()
-      result(true)
-      return
-    }
-
-    stopInternal(keepEventSink: true)
-
+    serviceUuid = CBUUID(string: serviceUuidString)
+    tokenCharacteristicUuid = CBUUID(string: characteristicUuidString)
+    currentTokenData = data
     isStarted = true
-    isAdvertising = false
-    isRanging = false
-    advertisingMode = "stopped"
 
-    currentUuid = uuid
-    ownMajor = CLBeaconMajorValue(major)
-    ownMinor = CLBeaconMinorValue(minor)
-
-    rssiSmoothed.removeAll()
-    lastEmitAt.removeAll()
+    peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
+    centralManager = CBCentralManager(delegate: self, queue: .main)
 
     emit([
       "type": "startRequested",
-      "uuid": uuid.uuidString,
-      "major": major,
-      "minor": minor,
-      "locationServicesEnabled": CLLocationManager.locationServicesEnabled(),
-      "platform": "ios"
+      "transport": "ble_gatt",
+      "platform": "ios",
+      "serviceUuid": serviceUuidString,
+      "tokenLength": token.count
     ])
-
-    let manager = CLLocationManager()
-    manager.delegate = self
-    manager.pausesLocationUpdatesAutomatically = false
-    manager.distanceFilter = kCLDistanceFilterNone
-    manager.allowsBackgroundLocationUpdates = false
-    manager.showsBackgroundLocationIndicator = false
-    locationManager = manager
-
-    let rx = CLBeaconRegion(uuid: uuid, identifier: regionIdentifier)
-    rx.notifyOnEntry = true
-    rx.notifyOnExit = true
-    rx.notifyEntryStateOnDisplay = true
-    rxRegion = rx
-
-    let tx = CLBeaconRegion(
-      uuid: uuid,
-      major: ownMajor,
-      minor: ownMinor,
-      identifier: regionIdentifier + ".tx"
-    )
-    txRegion = tx
-
-    let measuredPower = NSNumber(value: -59)
-
-    if let payload = tx.peripheralData(withMeasuredPower: measuredPower) as? [String: Any] {
-      iBeaconPayload = payload
-
-      emit([
-        "type": "advertisePayloadCreated",
-        "mode": "ibeacon",
-        "uuid": uuid.uuidString,
-        "major": major,
-        "minor": minor,
-        "payloadKeys": payload.keys.map { "\($0)" }.joined(separator: ","),
-        "platform": "ios"
-      ])
-    } else {
-      iBeaconPayload = nil
-
-      emit([
-        "type": "advertiseError",
-        "mode": "ibeacon",
-        "message": "Cast payload iBeacon fallito",
-        "platform": "ios"
-      ])
-    }
-
-    let iosServiceUuid = makeIosServiceUuid(major: major, minor: minor)
-
-    serviceUuidPayload = [
-      CBAdvertisementDataServiceUUIDsKey: [iosServiceUuid]
-    ]
-
-    emit([
-      "type": "advertisePayloadCreated",
-      "mode": "ios_service_uuid",
-      "uuid": uuid.uuidString,
-      "major": major,
-      "minor": minor,
-      "serviceUuid": iosServiceUuid.uuidString,
-      "payloadKeys": serviceUuidPayload?.keys.map { "\($0)" }.joined(separator: ",") ?? "",
-      "platform": "ios"
-    ])
-
-    peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
-
-    let status = currentAuthorizationStatus(for: manager)
-
-    emit([
-      "type": "locationAuthorization",
-      "status": status.rawValue,
-      "platform": "ios"
-    ])
-
-    switch status {
-    case .notDetermined:
-      manager.requestWhenInUseAuthorization()
-
-    case .authorizedWhenInUse, .authorizedAlways:
-      ensureRangingRunning()
-
-    case .restricted, .denied:
-      emit([
-        "type": "locationError",
-        "code": "LOCATION_DENIED",
-        "message": "Autorizzazione localizzazione negata o limitata.",
-        "status": status.rawValue,
-        "platform": "ios"
-      ])
-
-      result(
-        FlutterError(
-          code: "LOCATION_DENIED",
-          message: "Autorizzazione localizzazione negata o limitata.",
-          details: ["status": status.rawValue]
-        )
-      )
-      return
-
-    @unknown default:
-      emit([
-        "type": "locationError",
-        "code": "LOCATION_UNKNOWN_STATUS",
-        "status": status.rawValue,
-        "platform": "ios"
-      ])
-
-      result(
-        FlutterError(
-          code: "LOCATION_UNKNOWN_STATUS",
-          message: "Stato autorizzazione localizzazione non gestito.",
-          details: ["status": status.rawValue]
-        )
-      )
-      return
-    }
-
-    startStateReportTimer()
 
     result(true)
   }
 
-  private func makeIosServiceUuid(major: Int, minor: Int) -> CBUUID {
-    let majorHex = String(format: "%04x", major)
-    let minorHex = String(format: "%04x", minor)
-    let uuidString = "f2713c30-fa18-4173-8599-\(majorHex)\(minorHex)3c81"
-    return CBUUID(string: uuidString)
-  }
-
-  func applicationDidBecomeActive() {
-    guard isStarted else { return }
-
-    emit([
-      "type": "applicationDidBecomeActive",
-      "platform": "ios"
-    ])
-
-    ensureRangingRunning()
-    startAdvertisingCycle()
-  }
-
-  func applicationWillResignActive() {
-    guard isStarted else { return }
-
-    emit([
-      "type": "applicationWillResignActive",
-      "note": "iOS può limitare advertising BLE/iBeacon se l'app non resta in foreground.",
-      "platform": "ios"
-    ])
-  }
-
   func stop() {
-    stopInternal(keepEventSink: true)
+    stopInternal(emitStopped: true)
   }
 
-  private func stopInternal(keepEventSink: Bool) {
-    stopStateReportTimer()
-    stopAdvertisingCycle()
-
-    if let pm = peripheralManager {
-      pm.stopAdvertising()
+  private func stopInternal(emitStopped: Bool) {
+    if let central = centralManager {
+      central.stopScan()
+      for peripheral in discoveredPeripherals.values {
+        central.cancelPeripheralConnection(peripheral)
+      }
     }
 
-    isAdvertising = false
-    advertisingMode = "stopped"
+    peripheralManager?.stopAdvertising()
+    peripheralManager?.removeAllServices()
+
+    centralManager = nil
     peripheralManager = nil
-
-    if let manager = locationManager {
-      if let rx = rxRegion {
-        if isRanging {
-          if #available(iOS 13.0, *) {
-            manager.stopRangingBeacons(satisfying: rx.beaconIdentityConstraint)
-          } else {
-            manager.stopRangingBeacons(in: rx)
-          }
-        }
-
-        manager.stopMonitoring(for: rx)
-      }
-
-      for region in manager.monitoredRegions
-      where region.identifier.hasPrefix(regionIdentifier) {
-        manager.stopMonitoring(for: region)
-      }
-
-      manager.delegate = nil
-    }
-
-    isRanging = false
-    locationManager = nil
-
-    rxRegion = nil
-    txRegion = nil
-
-    iBeaconPayload = nil
-    serviceUuidPayload = nil
-    activeAdvertisingPayload = nil
-
-    currentUuid = nil
+    discoveredPeripherals.removeAll()
+    peripheralRssi.removeAll()
+    lastReadAt.removeAll()
     isStarted = false
 
-    rssiSmoothed.removeAll()
-    lastEmitAt.removeAll()
-
-    if !keepEventSink {
-      eventSink = nil
+    if emitStopped {
+      emit(["type": "stopped", "transport": "ble_gatt", "platform": "ios"])
     }
-  }
-
-  private func ensureRangingRunning() {
-    guard isStarted else {
-      emit([
-        "type": "scanNotReady",
-        "reason": "notStarted",
-        "platform": "ios"
-      ])
-      return
-    }
-
-    guard !isRanging else {
-      return
-    }
-
-    guard let manager = locationManager, let rx = rxRegion else {
-      emit([
-        "type": "scanNotReady",
-        "reason": "managerOrRegionNil",
-        "platform": "ios"
-      ])
-      return
-    }
-
-    let status = currentAuthorizationStatus(for: manager)
-
-    guard status == .authorizedAlways || status == .authorizedWhenInUse else {
-      emit([
-        "type": "locationAuthorization",
-        "status": status.rawValue,
-        "platform": "ios"
-      ])
-      return
-    }
-
-    manager.startMonitoring(for: rx)
-    manager.requestState(for: rx)
-
-    if #available(iOS 13.0, *) {
-      manager.startRangingBeacons(satisfying: rx.beaconIdentityConstraint)
-    } else {
-      manager.startRangingBeacons(in: rx)
-    }
-
-    isRanging = true
-
-    emit([
-      "type": "scanStarted",
-      "mode": "ibeacon_ranging",
-      "platform": "ios"
-    ])
-  }
-
-  private func startAdvertisingCycle() {
-    guard isStarted else { return }
-    guard peripheralManager?.state == .poweredOn else {
-      emit([
-        "type": "advertisingCycleNotReady",
-        "reason": "bluetoothNotPoweredOn",
-        "bluetoothState": peripheralManager?.state.rawValue ?? -1,
-        "platform": "ios"
-      ])
-      return
-    }
-
-    stopAdvertisingCycle()
-    switchToIBeaconAdvertising()
-  }
-
-  private func stopAdvertisingCycle() {
-    advertisingCycleTimer?.invalidate()
-    advertisingCycleTimer = nil
-  }
-
-  private func scheduleNextIBeaconWindow() {
-    stopAdvertisingCycle()
-
-    advertisingCycleTimer = Timer.scheduledTimer(withTimeInterval: serviceWindowSeconds, repeats: false) {
-      [weak self] _ in
-      self?.switchToIBeaconAdvertising()
-    }
-
-    if let timer = advertisingCycleTimer {
-      RunLoop.main.add(timer, forMode: .common)
-    }
-  }
-
-  private func scheduleNextServiceWindow() {
-    stopAdvertisingCycle()
-
-    advertisingCycleTimer = Timer.scheduledTimer(withTimeInterval: iBeaconWindowSeconds, repeats: false) {
-      [weak self] _ in
-      self?.switchToServiceAdvertising()
-    }
-
-    if let timer = advertisingCycleTimer {
-      RunLoop.main.add(timer, forMode: .common)
-    }
-  }
-
-  private func switchToIBeaconAdvertising() {
-    guard let payload = iBeaconPayload else {
-      emit([
-        "type": "advertisingSwitchSkipped",
-        "mode": "ibeacon",
-        "reason": "payloadNil",
-        "platform": "ios"
-      ])
-
-      switchToServiceAdvertising()
-      return
-    }
-
-    startAdvertising(payload: payload, mode: "ibeacon")
-    scheduleNextServiceWindow()
-  }
-
-  private func switchToServiceAdvertising() {
-    guard let payload = serviceUuidPayload else {
-      emit([
-        "type": "advertisingSwitchSkipped",
-        "mode": "ios_service_uuid",
-        "reason": "payloadNil",
-        "platform": "ios"
-      ])
-
-      switchToIBeaconAdvertising()
-      return
-    }
-
-    startAdvertising(payload: payload, mode: "ios_service_uuid")
-    scheduleNextIBeaconWindow()
-  }
-
-  private func startAdvertising(payload: [String: Any], mode: String) {
-    guard isStarted else {
-      emit([
-        "type": "advertiseNotReady",
-        "reason": "notStarted",
-        "mode": mode,
-        "platform": "ios"
-      ])
-      return
-    }
-
-    guard let pm = peripheralManager else {
-      emit([
-        "type": "advertiseNotReady",
-        "reason": "peripheralManagerNil",
-        "mode": mode,
-        "platform": "ios"
-      ])
-      return
-    }
-
-    guard pm.state == .poweredOn else {
-      emit([
-        "type": "advertiseNotReady",
-        "reason": "bluetoothNotPoweredOn",
-        "bluetoothState": pm.state.rawValue,
-        "mode": mode,
-        "platform": "ios"
-      ])
-      return
-    }
-
-    pm.stopAdvertising()
-
-    isAdvertising = false
-    advertisingMode = mode
-    activeAdvertisingPayload = payload
-
-    emit([
-      "type": "advertiseStartRequested",
-      "mode": mode,
-      "payloadKeys": payload.keys.map { "\($0)" }.joined(separator: ","),
-      "platform": "ios"
-    ])
-
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-      guard let self else { return }
-      guard self.isStarted else { return }
-      guard let pm = self.peripheralManager else { return }
-      guard pm.state == .poweredOn else { return }
-
-      pm.startAdvertising(payload)
-    }
-  }
-
-  private func startStateReportTimer() {
-    stopStateReportTimer()
-
-    stateReportTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) {
-      [weak self] _ in
-      guard let self, self.isStarted else { return }
-
-      self.emit([
-        "type": "stateWatchdog",
-        "bluetoothState": self.peripheralManager?.state.rawValue ?? -1,
-        "locationStatus": self.locationManager.map {
-          self.currentAuthorizationStatus(for: $0).rawValue
-        } ?? -1,
-        "isRanging": self.isRanging,
-        "isAdvertising": self.isAdvertising,
-        "advertisingMode": self.advertisingMode,
-        "hasIBeaconPayload": self.iBeaconPayload != nil,
-        "hasServicePayload": self.serviceUuidPayload != nil,
-        "isStarted": self.isStarted,
-        "platform": "ios"
-      ])
-
-      self.ensureRangingRunning()
-
-      if self.peripheralManager?.state == .poweredOn, !self.isAdvertising {
-        self.startAdvertisingCycle()
-      }
-    }
-
-    if let timer = stateReportTimer {
-      RunLoop.main.add(timer, forMode: .common)
-    }
-  }
-
-  private func stopStateReportTimer() {
-    stateReportTimer?.invalidate()
-    stateReportTimer = nil
   }
 
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-    emit([
-      "type": "bluetoothStateChanged",
-      "state": peripheral.state.rawValue,
-      "platform": "ios"
-    ])
+    guard isStarted else { return }
 
-    switch peripheral.state {
-    case .poweredOn:
-      emit([
-        "type": "bluetoothOn",
-        "platform": "ios"
-      ])
-
-      isAdvertising = false
-      startAdvertisingCycle()
-
-    case .poweredOff:
-      emit([
-        "type": "bluetoothOff",
-        "platform": "ios"
-      ])
-      isAdvertising = false
-
-    case .unauthorized:
-      emit([
-        "type": "bluetoothUnauthorized",
-        "platform": "ios"
-      ])
-      isAdvertising = false
-
-    case .unsupported:
-      emit([
-        "type": "bluetoothUnsupported",
-        "platform": "ios"
-      ])
-      isAdvertising = false
-
-    case .resetting:
-      emit([
-        "type": "bluetoothResetting",
-        "platform": "ios"
-      ])
-      isAdvertising = false
-
-    default:
-      emit([
-        "type": "bluetoothState",
-        "state": peripheral.state.rawValue,
-        "platform": "ios"
-      ])
-    }
-  }
-
-  func peripheralManager(
-    _ peripheral: CBPeripheralManager,
-    didStartAdvertising error: Error?
-  ) {
-    if let error = error {
-      isAdvertising = false
-
-      emit([
-        "type": "advertiseError",
-        "mode": advertisingMode,
-        "message": error.localizedDescription,
-        "platform": "ios"
-      ])
-
-      DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-        self?.startAdvertisingCycle()
-      }
-    } else {
-      isAdvertising = true
-
-      emit([
-        "type": "advertiseStarted",
-        "mode": advertisingMode,
-        "platform": "ios"
-      ])
-    }
-  }
-
-  @available(iOS 14.0, *)
-  func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-    handleAuthorization(currentAuthorizationStatus(for: manager), manager: manager)
-  }
-
-  func locationManager(
-    _ manager: CLLocationManager,
-    didChangeAuthorization status: CLAuthorizationStatus
-  ) {
-    handleAuthorization(status, manager: manager)
-  }
-
-  private func handleAuthorization(
-    _ status: CLAuthorizationStatus,
-    manager: CLLocationManager
-  ) {
-    emit([
-      "type": "locationAuthorization",
-      "status": status.rawValue,
-      "platform": "ios"
-    ])
-
-    switch status {
-    case .authorizedAlways, .authorizedWhenInUse:
-      ensureRangingRunning()
-
-    case .denied, .restricted:
-      isRanging = false
-
-      emit([
-        "type": "locationError",
-        "code": "LOCATION_DENIED",
-        "message": "Autorizzazione localizzazione negata o limitata.",
-        "platform": "ios"
-      ])
-
-    case .notDetermined:
-      manager.requestWhenInUseAuthorization()
-
-    @unknown default:
-      break
-    }
-  }
-
-  private func currentAuthorizationStatus(
-    for manager: CLLocationManager
-  ) -> CLAuthorizationStatus {
-    if #available(iOS 14.0, *) {
-      return manager.authorizationStatus
+    guard peripheral.state == .poweredOn else {
+      emit(["type": "peripheralState", "state": stateName(peripheral.state), "platform": "ios"])
+      return
     }
 
-    return CLLocationManager.authorizationStatus()
+    startGattServerAndAdvertising()
   }
 
-  func locationManager(
-    _ manager: CLLocationManager,
-    didDetermineState state: CLRegionState,
-    for region: CLRegion
-  ) {
-    emit([
-      "type": "regionState",
-      "state": state.rawValue,
-      "identifier": region.identifier,
-      "platform": "ios"
+  private func startGattServerAndAdvertising() {
+    guard let peripheralManager = peripheralManager,
+          let serviceUuid = serviceUuid,
+          let tokenCharacteristicUuid = tokenCharacteristicUuid else { return }
+
+    peripheralManager.removeAllServices()
+
+    let characteristic = CBMutableCharacteristic(
+      type: tokenCharacteristicUuid,
+      properties: [.read],
+      value: nil,
+      permissions: [.readable]
+    )
+
+    let service = CBMutableService(type: serviceUuid, primary: true)
+    service.characteristics = [characteristic]
+    peripheralManager.add(service)
+
+    peripheralManager.startAdvertising([
+      CBAdvertisementDataServiceUUIDsKey: [serviceUuid],
+      CBAdvertisementDataLocalNameKey: "ProxiMeet"
     ])
+
+    emit(["type": "advertisingStarted", "transport": "ble_gatt", "platform": "ios"])
   }
 
-  func locationManager(
-    _ manager: CLLocationManager,
-    monitoringDidFailFor region: CLRegion?,
-    withError error: Error
+  func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
+    guard let tokenCharacteristicUuid = tokenCharacteristicUuid,
+          request.characteristic.uuid == tokenCharacteristicUuid,
+          let data = currentTokenData else {
+      peripheral.respond(to: request, withResult: .attributeNotFound)
+      return
+    }
+
+    request.value = data
+    peripheral.respond(to: request, withResult: .success)
+  }
+
+  func centralManagerDidUpdateState(_ central: CBCentralManager) {
+    guard isStarted else { return }
+
+    guard central.state == .poweredOn else {
+      emit(["type": "centralState", "state": stateName(central.state), "platform": "ios"])
+      return
+    }
+
+    startScanning()
+  }
+
+  private func startScanning() {
+    guard let centralManager = centralManager, let serviceUuid = serviceUuid else { return }
+
+    centralManager.stopScan()
+    centralManager.scanForPeripherals(
+      withServices: [serviceUuid],
+      options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+    )
+
+    emit(["type": "scanStarted", "transport": "ble_gatt", "platform": "ios"])
+  }
+
+  func centralManager(
+    _ central: CBCentralManager,
+    didDiscover peripheral: CBPeripheral,
+    advertisementData: [String : Any],
+    rssi RSSI: NSNumber
   ) {
-    isRanging = false
+    guard isStarted else { return }
 
-    emit([
-      "type": "monitoringError",
-      "identifier": region?.identifier ?? "unknown",
-      "message": error.localizedDescription,
-      "platform": "ios"
-    ])
-  }
+    let rssi = RSSI.intValue
+    guard rssi > -100 else { return }
 
-  func locationManager(
-    _ manager: CLLocationManager,
-    didFailWithError error: Error
-  ) {
-    emit([
-      "type": "locationError",
-      "message": error.localizedDescription,
-      "platform": "ios"
-    ])
-  }
+    peripheralRssi[peripheral.identifier] = rssi
 
-  @available(iOS 13.0, *)
-  func locationManager(
-    _ manager: CLLocationManager,
-    didRange beacons: [CLBeacon],
-    satisfying beaconConstraint: CLBeaconIdentityConstraint
-  ) {
-    handleRangedBeacons(beacons)
-  }
-
-  func locationManager(
-    _ manager: CLLocationManager,
-    didRangeBeacons beacons: [CLBeacon],
-    in region: CLBeaconRegion
-  ) {
-    handleRangedBeacons(beacons)
-  }
-
-  private func handleRangedBeacons(_ beacons: [CLBeacon]) {
     let now = Date().timeIntervalSince1970
-
-    for beacon in beacons {
-      guard beacon.rssi != 0, beacon.rssi > minValidRssi else {
-        continue
-      }
-
-      let foundMajor = beacon.major.intValue
-      let foundMinor = beacon.minor.intValue
-
-      if foundMajor == Int(ownMajor), foundMinor == Int(ownMinor) {
-        continue
-      }
-
-      let key = "\(foundMajor)_\(foundMinor)"
-      let rawRssi = Double(beacon.rssi)
-
-      let smoothed: Double
-
-      if let previous = rssiSmoothed[key] {
-        smoothed = ewmaAlpha * rawRssi + (1.0 - ewmaAlpha) * previous
-      } else {
-        smoothed = rawRssi
-      }
-
-      rssiSmoothed[key] = smoothed
-
-      let last = lastEmitAt[key] ?? 0.0
-
-      if now - last < minEmitInterval {
-        continue
-      }
-
-      lastEmitAt[key] = now
-
-      emit([
-        "type": "beacon",
-        "major": foundMajor,
-        "minor": foundMinor,
-        "rssi": Int(smoothed),
-        "rawRssi": beacon.rssi,
-        "source": "ibeacon",
-        "platform": "ios"
-      ])
+    if let last = lastReadAt[peripheral.identifier], now - last < readThrottleSeconds {
+      return
     }
 
-    purgeOldRssiState(now: now)
+    discoveredPeripherals[peripheral.identifier] = peripheral
+    peripheral.delegate = self
+
+    if peripheral.state == .connected {
+      peripheral.discoverServices([serviceUuid].compactMap { $0 })
+    } else {
+      central.connect(peripheral, options: nil)
+    }
   }
 
-  private func purgeOldRssiState(now: TimeInterval) {
-    let stale = lastEmitAt
-      .filter { now - $0.value > 60.0 }
-      .map { $0.key }
+  func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    peripheral.discoverServices([serviceUuid].compactMap { $0 })
+  }
 
-    for key in stale {
-      lastEmitAt.removeValue(forKey: key)
-      rssiSmoothed.removeValue(forKey: key)
+  func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+    emit(["type": "connectFailed", "platform": "ios", "error": error?.localizedDescription ?? "unknown"])
+  }
+
+  func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+    if let error = error {
+      emit(["type": "discoverServicesFailed", "platform": "ios", "error": error.localizedDescription])
+      return
+    }
+
+    guard let tokenCharacteristicUuid = tokenCharacteristicUuid else { return }
+
+    for service in peripheral.services ?? [] {
+      peripheral.discoverCharacteristics([tokenCharacteristicUuid], for: service)
+    }
+  }
+
+  func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+    if let error = error {
+      emit(["type": "discoverCharacteristicsFailed", "platform": "ios", "error": error.localizedDescription])
+      return
+    }
+
+    guard let tokenCharacteristicUuid = tokenCharacteristicUuid else { return }
+
+    for characteristic in service.characteristics ?? [] where characteristic.uuid == tokenCharacteristicUuid {
+      peripheral.readValue(for: characteristic)
+    }
+  }
+
+  func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+    if let error = error {
+      emit(["type": "readFailed", "platform": "ios", "error": error.localizedDescription])
+      return
+    }
+
+    guard let tokenCharacteristicUuid = tokenCharacteristicUuid,
+          characteristic.uuid == tokenCharacteristicUuid,
+          let data = characteristic.value,
+          let token = String(data: data, encoding: .utf8),
+          !token.isEmpty else { return }
+
+    lastReadAt[peripheral.identifier] = Date().timeIntervalSince1970
+    let rssi = peripheralRssi[peripheral.identifier] ?? -90
+
+    emit([
+      "type": "gattPeer",
+      "transport": "ble_gatt",
+      "platform": "ios",
+      "token": token,
+      "rssi": rssi
+    ])
+
+    if let central = centralManager {
+      central.cancelPeripheralConnection(peripheral)
     }
   }
 
   private func emit(_ payload: [String: Any]) {
     DispatchQueue.main.async { [weak self] in
       self?.eventSink?(payload)
+    }
+  }
+
+  private func stateName(_ state: CBManagerState) -> String {
+    switch state {
+    case .unknown: return "unknown"
+    case .resetting: return "resetting"
+    case .unsupported: return "unsupported"
+    case .unauthorized: return "unauthorized"
+    case .poweredOff: return "poweredOff"
+    case .poweredOn: return "poweredOn"
+    @unknown default: return "unknown"
     }
   }
 }

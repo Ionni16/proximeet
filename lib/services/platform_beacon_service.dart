@@ -8,20 +8,22 @@ import '../core/logger.dart';
 import '../models/nearby_user.dart';
 import 'debug_error_service.dart';
 
+/// Trasporto nativo BLE GATT bidirezionale.
+///
+/// Ogni telefono espone un GATT server con un Service UUID fisso e una
+/// characteristic leggibile contenente un token temporaneo. In parallelo fa
+/// scan dello stesso Service UUID, si connette ai peer e legge il token.
+///
+/// Nota: il nome del canale resta `proximeet/beacon` per compatibilità con il
+/// codice esistente, ma il path primario non è più iBeacon.
 class PlatformBeaconService {
   PlatformBeaconService._() {
-    // ── FIX iOS BEACON_START_FALSE E CRASH ──────────────────────────────────
-    // La sottoscrizione all'EventChannel viene fatta UNA SOLA VOLTA qui,
-    // alla creazione del singleton. Vive per tutta l'esecuzione dell'app.
-    // start() e stop() chiamano solo il MethodChannel nativo per
-    // avviare/fermare advertising+ranging; lo stream di eventi rimane aperto.
-    // ─────────────────────────────────────────────────────────────────────────
     _nativeSub = _events.receiveBroadcastStream().listen(
       _onNativeEvent,
       onError: (Object e, StackTrace st) {
         _lastError = DebugErrorService.instance.fromException(
-          area: 'BEACON_NATIVE_EVENTS',
-          fallbackTitle: 'Errore eventi nativi beacon',
+          area: 'BLE_GATT_NATIVE_EVENTS',
+          fallbackTitle: 'Errore eventi nativi BLE GATT',
           fallbackMessage: 'Il canale EventChannel ha restituito un errore.',
           fallbackSuggestion:
               'Controlla AppDelegate.swift / ProxiMeetBeaconPlugin.kt.',
@@ -40,85 +42,79 @@ class PlatformBeaconService {
   final StreamController<RawBleDetection> _controller =
       StreamController<RawBleDetection>.broadcast();
 
-  // Subscription persistente: non viene mai cancellata.
   StreamSubscription<dynamic>? _nativeSub;
 
   bool _isRunning = false;
-  String? _myBeaconKey;
+  String? _myToken;
   AppDebugError? _lastError;
 
   bool get isRunning => _isRunning;
-  String? get myBeaconKey => _myBeaconKey;
+  String? get myBeaconKey => _myToken;
+  String? get myToken => _myToken;
   AppDebugError? get lastError => _lastError;
   Stream<RawBleDetection> get detections => _controller.stream;
 
-  Future<bool> start(String beaconKey) async {
+  Future<bool> start(String token) async {
     _lastError = null;
 
-    if (_isRunning && _myBeaconKey == beaconKey) return true;
+    if (_isRunning && _myToken == token) return true;
 
-    if (!AppConstants.isValidBeaconKey(beaconKey)) {
+    if (!AppConstants.isValidProximityToken(token)) {
       _lastError = DebugErrorService.instance.add(AppDebugError(
-        title: 'Beacon key non valida',
-        area: 'BEACON_START',
-        code: 'INVALID_BEACON_KEY',
-        message: 'La chiave beacon deve essere nel formato 00000_00000.',
-        suggestion:
-            'Controlla EventSessionService._generateBeaconKey() e AppConstants.beaconKey().',
-        data: <String, Object?>{'beaconKey': beaconKey},
+        title: 'Token BLE non valido',
+        area: 'BLE_GATT_START',
+        code: 'INVALID_PROXIMITY_TOKEN',
+        message: 'Il token BLE temporaneo non è valido.',
+        suggestion: 'Controlla EventSessionService._generateEphemeralToken().',
+        data: <String, Object?>{'tokenLength': token.length},
       ));
       return false;
     }
 
-    // Ferma il native precedente senza toccare la subscription EventChannel.
     await _stopNative();
-
-    final parsed = AppConstants.parseBeaconKey(beaconKey);
 
     try {
       final ok = await _method.invokeMethod<bool>('start', <String, dynamic>{
-        'uuid': AppConstants.proximeetBeaconUuid,
-        'major': parsed.major,
-        'minor': parsed.minor,
+        'serviceUuid': AppConstants.proximeetGattServiceUuid,
+        'tokenCharacteristicUuid': AppConstants.proximeetGattTokenCharacteristicUuid,
+        'token': token,
+        'transport': 'ble_gatt',
       });
 
       if (ok != true) {
         _lastError = DebugErrorService.instance.add(AppDebugError(
-          title: 'Beacon non avviato',
-          area: 'BEACON_START',
+          title: 'BLE GATT non avviato',
+          area: 'BLE_GATT_START',
           code: 'NATIVE_START_RETURNED_FALSE',
           message: 'Il metodo nativo start ha risposto false/null.',
           suggestion:
-              'Controlla lo stato Bluetooth e i log nativi. Il join deve continuare comunque.',
+              'Controlla Bluetooth, permessi Nearby Devices/Localizzazione e log nativi.',
           data: <String, Object?>{
-            'beaconKey': beaconKey,
-            'uuid': AppConstants.proximeetBeaconUuid,
-            'major': parsed.major,
-            'minor': parsed.minor,
-            'nativeResult': ok,
+            'tokenLength': token.length,
+            'serviceUuid': AppConstants.proximeetGattServiceUuid,
+            'characteristicUuid': AppConstants.proximeetGattTokenCharacteristicUuid,
           },
         ));
         return false;
       }
 
       _isRunning = true;
-      _myBeaconKey = beaconKey;
-      Log.d('BEACON', 'Avviato beaconKey=$beaconKey');
+      _myToken = token;
+      Log.d('BLE_GATT', 'Avviato token=${_redact(token)}');
       return true;
     } catch (e, st) {
       _lastError = DebugErrorService.instance.fromException(
-        area: 'BEACON_START',
-        fallbackTitle: 'Errore avvio iBeacon',
-        fallbackMessage: 'Il plugin nativo non ha avviato advertising/ranging.',
+        area: 'BLE_GATT_START',
+        fallbackTitle: 'Errore avvio BLE GATT',
+        fallbackMessage:
+            'Il plugin nativo non ha avviato advertising/scanning GATT.',
         fallbackSuggestion:
             'Controlla MethodChannel proximeet/beacon, permessi e codice Swift/Kotlin.',
         error: e,
         stackTrace: st,
         data: <String, Object?>{
-          'beaconKey': beaconKey,
-          'uuid': AppConstants.proximeetBeaconUuid,
-          'major': parsed.major,
-          'minor': parsed.minor,
+          'tokenLength': token.length,
+          'serviceUuid': AppConstants.proximeetGattServiceUuid,
         },
       );
       return false;
@@ -128,8 +124,8 @@ class PlatformBeaconService {
   void _onNativeEvent(dynamic event) {
     if (event is! Map) {
       DebugErrorService.instance.add(AppDebugError(
-        title: 'Evento beacon non valido',
-        area: 'BEACON_NATIVE_EVENTS',
+        title: 'Evento BLE non valido',
+        area: 'BLE_GATT_NATIVE_EVENTS',
         code: 'INVALID_NATIVE_EVENT',
         message: 'Il plugin nativo ha inviato un evento non Map.',
         suggestion: 'Controlla eventSink in Swift/Kotlin.',
@@ -139,36 +135,35 @@ class PlatformBeaconService {
     }
 
     final type = event['type']?.toString();
-    if (type != null && type != 'beacon') {
-      Log.d('BEACON', 'Native event: $event');
+    if (type != null && type != 'gattPeer' && type != 'beacon') {
+      Log.d('BLE_GATT', 'Native event: $event');
       return;
     }
 
-    final major = _asInt(event['major']);
-    final minor = _asInt(event['minor']);
+    final token = (event['token'] ?? event['sessionBleId'] ?? event['beaconKey'])
+        ?.toString()
+        .trim();
 
-    if (major == null || minor == null) {
+    if (token == null || token.isEmpty) {
       DebugErrorService.instance.add(AppDebugError(
-        title: 'Evento beacon senza major/minor',
-        area: 'BEACON_NATIVE_EVENTS',
-        code: 'MISSING_MAJOR_MINOR',
-        message:
-            'Il plugin nativo ha inviato un beacon senza major/minor validi.',
-        suggestion:
-            'Controlla handleRangedBeacons in Swift e parseIBeacon in Kotlin.',
+        title: 'Evento BLE senza token',
+        area: 'BLE_GATT_NATIVE_EVENTS',
+        code: 'MISSING_TOKEN',
+        message: 'Il plugin nativo ha inviato una detection senza token.',
+        suggestion: 'Controlla lettura characteristic GATT nel plugin nativo.',
         data: Map<String, Object?>.from(event),
       ));
       return;
     }
 
-    final beaconKey = AppConstants.beaconKey(major, minor);
-    if (beaconKey == _myBeaconKey) return;
+    if (token == _myToken) return;
 
     final rssi = _asInt(event['rssi']) ?? -90;
     _controller.add(RawBleDetection(
-      sessionBleId: beaconKey,
+      sessionBleId: token,
       rssi: rssi,
       timestamp: DateTime.now(),
+      transport: event['transport']?.toString() ?? 'ble_gatt',
     ));
   }
 
@@ -179,33 +174,34 @@ class PlatformBeaconService {
     return null;
   }
 
-  /// Ferma il plugin nativo senza toccare la subscription EventChannel.
   Future<void> _stopNative() async {
     try {
       await _method.invokeMethod<void>('stop');
     } catch (e, st) {
       DebugErrorService.instance.fromException(
-        area: 'BEACON_STOP',
-        fallbackTitle: 'Errore stop iBeacon',
+        area: 'BLE_GATT_STOP',
+        fallbackTitle: 'Errore stop BLE GATT',
         fallbackMessage: 'Il plugin nativo non ha confermato lo stop.',
-        fallbackSuggestion:
-            'Di solito non è bloccante. Controlla se il plugin è registrato.',
+        fallbackSuggestion: 'Di solito non è bloccante. Controlla i log nativi.',
         error: e,
         stackTrace: st,
       );
     }
     _isRunning = false;
-    _myBeaconKey = null;
+    _myToken = null;
   }
 
   Future<void> stop() async {
     await _stopNative();
-    Log.d('BEACON', 'Fermato');
+    Log.d('BLE_GATT', 'Fermato');
   }
 
   Future<void> dispose() async {
     await _stopNative();
-    // NOTA: Non cancelliamo _nativeSub né _controller qui: il servizio è un
-    // singleton e gli stream devono restare vivi per i rientri nella schermata radar.
+  }
+
+  String _redact(String value) {
+    if (value.length <= 10) return '***';
+    return '${value.substring(0, 6)}…${value.substring(value.length - 4)}';
   }
 }
