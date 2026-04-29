@@ -27,7 +27,11 @@ class FirestoreService {
     final data = doc.data();
     if (data == null) return null;
 
-    return UserModel.fromMap(data);
+    // Il doc id è la source of truth: alcuni profili storici non hanno uid.
+    return UserModel.fromMap({
+      ...data,
+      'uid': (data['uid'] ?? uid).toString(),
+    });
   }
 
   // ── EVENTI ──────────────────────────────────────────────
@@ -69,7 +73,11 @@ class FirestoreService {
 
   /// Invia richiesta contatto. Consentita solo se l'utente è nearby
   /// o è stato rilevato di recente nei dati detection.
-  Future<void> sendConnectionRequest(String targetUid) async {
+  Future<void> sendConnectionRequest(
+    String targetUid, {
+    bool fromQr = false,
+    String? qrEventId,
+  }) async {
     final myUid = FirebaseAuth.instance.currentUser?.uid;
     if (myUid == null) {
       throw Exception('Non autenticato');
@@ -84,10 +92,17 @@ class FirestoreService {
       throw Exception('Non sei in nessun evento');
     }
 
-    final isNearby = NearbyDetectionService.instance.isRecentlyDetected(
-      targetUid,
-      maxSeconds: AppConstants.contactGatingSeconds,
-    );
+    if (qrEventId != null && qrEventId.isNotEmpty && qrEventId != eventId) {
+      throw Exception('QR di un altro evento');
+    }
+
+    // QR = consenso/prossimità esplicita. Non deve dipendere dallo scan BLE,
+    // soprattutto nel caso Android foreground che non vede subito iPhone.
+    final isNearby = fromQr ||
+        NearbyDetectionService.instance.isRecentlyDetected(
+          targetUid,
+          maxSeconds: AppConstants.contactGatingSeconds,
+        );
 
     if (!isNearby) {
       final det = await _db
@@ -120,6 +135,7 @@ class FirestoreService {
 
     final requestId = '${myUid}_${targetUid}_$eventId';
     final requestRef = _db.collection('connectionRequests').doc(requestId);
+    final sender = await getUserByUid(myUid);
 
     await _db.runTransaction((tx) async {
       final existing = await tx.get(requestRef);
@@ -140,6 +156,11 @@ class FirestoreService {
         'receiverUid': targetUid,
         'eventId': eventId,
         'status': 'pending',
+        'source': fromQr ? 'qr' : 'ble',
+        'senderDisplayName': sender?.fullName ?? '',
+        'senderCompany': sender?.company ?? '',
+        'senderRole': sender?.role ?? '',
+        'senderAvatarURL': sender?.avatarURL.trim() ?? '',
         'createdAt': FieldValue.serverTimestamp(),
         'createdAtClient': Timestamp.now(),
       });
