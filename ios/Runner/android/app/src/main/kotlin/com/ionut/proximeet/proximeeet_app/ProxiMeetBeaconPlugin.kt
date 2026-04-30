@@ -8,7 +8,6 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
@@ -20,7 +19,6 @@ import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -34,14 +32,21 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.Locale
 import java.util.UUID
 
 /**
- * BLE GATT bidirezionale per ProxiMeet.
+ * ProxiMeet BLE GATT bidirezionale.
  *
- * Ogni device è contemporaneamente:
+ * Ogni telefono è contemporaneamente:
  * - GATT server/peripheral: advertise Service UUID fisso + characteristic token leggibile.
- * - GATT client/central: scan Service UUID, connectGatt, readCharacteristic(token).
+ * - GATT client/central: scan, connectGatt, discoverServices, read characteristic token.
+ *
+ * Correzioni importanti rispetto alla prima versione:
+ * - Scan Android senza filtro hardware obbligatorio: diversi device rilevano più rapidamente iOS così.
+ * - Retry controllato anche sui fallimenti: niente loop connect/discover/close continuo.
+ * - Un solo discoverServices per connessione.
+ * - Eventi diagnostici espliciti fino a tokenReadComplete/gattPeer.
  */
 class ProxiMeetBeaconPlugin(
     private val activity: Activity,
@@ -53,8 +58,7 @@ class ProxiMeetBeaconPlugin(
     private var eventSink: EventChannel.EventSink? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val bluetoothManager =
-        activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val bluetoothManager = activity.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
 
     private val adapter: BluetoothAdapter?
         get() = bluetoothManager.adapter
@@ -64,16 +68,31 @@ class ProxiMeetBeaconPlugin(
     private var gattServer: BluetoothGattServer? = null
     private var advertiseCallback: AdvertiseCallback? = null
     private var scanCallback: ScanCallback? = null
+    private var isAdvertisingStarted: Boolean = false
 
     private var serviceUuid: UUID = DEFAULT_SERVICE_UUID
     private var tokenCharacteristicUuid: UUID = DEFAULT_TOKEN_CHARACTERISTIC_UUID
     private var currentToken: String = ""
+    private var currentTokenBytes: ByteArray = ByteArray(0)
     private var isStarted: Boolean = false
 
     private val activeGatts = mutableMapOf<String, BluetoothGatt>()
+    private val discoveryStarted = mutableSetOf<String>()
     private val resultRssi = mutableMapOf<String, Int>()
-    private val lastReadAt = mutableMapOf<String, Long>()
-    private val readThrottleMs = 3000L
+    private val lastAttemptAt = mutableMapOf<String, Long>()
+    private val lastSuccessAt = mutableMapOf<String, Long>()
+
+    private val connectRetryMs = 2500L
+    private val successfulReadThrottleMs = 2500L
+    private val scanRestartMs = 15000L
+
+    private val scanRestartRunnable = object : Runnable {
+        override fun run() {
+            if (!isStarted) return
+            restartScanningBestEffort()
+            mainHandler.postDelayed(this, scanRestartMs)
+        }
+    }
 
     init {
         methodChannel.setMethodCallHandler(this)
@@ -91,10 +110,8 @@ class ProxiMeetBeaconPlugin(
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "start" -> {
-                val serviceUuidString = call.argument<String>("serviceUuid")
-                    ?: DEFAULT_SERVICE_UUID.toString()
-                val characteristicUuidString = call.argument<String>("tokenCharacteristicUuid")
-                    ?: DEFAULT_TOKEN_CHARACTERISTIC_UUID.toString()
+                val serviceUuidString = call.argument<String>("serviceUuid") ?: DEFAULT_SERVICE_UUID.toString()
+                val characteristicUuidString = call.argument<String>("tokenCharacteristicUuid") ?: DEFAULT_TOKEN_CHARACTERISTIC_UUID.toString()
                 val token = call.argument<String>("token")
 
                 if (token.isNullOrBlank()) {
@@ -142,6 +159,10 @@ class ProxiMeetBeaconPlugin(
             result.error("MISSING_ADVERTISE_PERMISSION", "BLUETOOTH_ADVERTISE mancante", null)
             return
         }
+        if (!hasConnectPermission()) {
+            result.error("MISSING_CONNECT_PERMISSION", "BLUETOOTH_CONNECT mancante", null)
+            return
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationEnabled()) {
             result.error("LOCATION_OFF", "Localizzazione disattivata: richiesta per BLE scan su Android <= 11", null)
             return
@@ -152,26 +173,34 @@ class ProxiMeetBeaconPlugin(
         serviceUuid = UUID.fromString(serviceUuidString)
         tokenCharacteristicUuid = UUID.fromString(characteristicUuidString)
         currentToken = token
+        currentTokenBytes = token.toByteArray(Charsets.UTF_8)
         isStarted = true
 
         advertiser = bluetoothAdapter.bluetoothLeAdvertiser
         scanner = bluetoothAdapter.bluetoothLeScanner
 
-        startGattServer()
-        val advOk = startAdvertising()
+        val serverOk = startGattServer()
+        // Advertising parte dal callback onServiceAdded: così un peer non può connettersi
+        // mentre il GATT service non è ancora visibile.
+        val advOk = false
         val scanOk = startScanning()
+
+        mainHandler.removeCallbacks(scanRestartRunnable)
+        mainHandler.postDelayed(scanRestartRunnable, scanRestartMs)
 
         emit(mapOf(
             "type" to "startRequested",
             "transport" to "ble_gatt",
             "platform" to "android",
+            "gattServer" to serverOk,
             "advertising" to advOk,
             "scanning" to scanOk,
             "serviceUuid" to serviceUuid.toString(),
+            "characteristicUuid" to tokenCharacteristicUuid.toString(),
             "tokenLength" to token.length
         ))
 
-        result.success(advOk || scanOk)
+        result.success(serverOk || advOk || scanOk)
     }
 
     @SuppressLint("MissingPermission")
@@ -181,6 +210,8 @@ class ProxiMeetBeaconPlugin(
 
     @SuppressLint("MissingPermission")
     private fun stopInternal(emitStopped: Boolean) {
+        mainHandler.removeCallbacks(scanRestartRunnable)
+
         scanCallback?.let { cb ->
             try { scanner?.stopScan(cb) } catch (_: Exception) {}
         }
@@ -190,24 +221,25 @@ class ProxiMeetBeaconPlugin(
             try { advertiser?.stopAdvertising(cb) } catch (_: Exception) {}
         }
         advertiseCallback = null
+        isAdvertisingStarted = false
 
         activeGatts.values.forEach { gatt ->
             try { gatt.disconnect() } catch (_: Exception) {}
             try { gatt.close() } catch (_: Exception) {}
         }
         activeGatts.clear()
+        discoveryStarted.clear()
 
         try { gattServer?.clearServices() } catch (_: Exception) {}
         try { gattServer?.close() } catch (_: Exception) {}
         gattServer = null
 
         resultRssi.clear()
-        lastReadAt.clear()
+        lastAttemptAt.clear()
+        lastSuccessAt.clear()
         isStarted = false
 
-        if (emitStopped) {
-            emit(mapOf("type" to "stopped", "transport" to "ble_gatt", "platform" to "android"))
-        }
+        if (emitStopped) emit(mapOf("type" to "stopped", "transport" to "ble_gatt", "platform" to "android"))
     }
 
     @SuppressLint("MissingPermission")
@@ -222,20 +254,38 @@ class ProxiMeetBeaconPlugin(
             BluetoothGattCharacteristic.PERMISSION_READ
         )
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            @Suppress("DEPRECATION")
-            characteristic.value = currentToken.toByteArray(Charsets.UTF_8)
-        }
+        @Suppress("DEPRECATION")
+        characteristic.value = currentTokenBytes
 
         service.addCharacteristic(characteristic)
-        server.addService(service)
+        val added = server.addService(service)
         gattServer = server
 
-        emit(mapOf("type" to "gattServerStarted", "transport" to "ble_gatt", "platform" to "android"))
+        emit(mapOf(
+            "type" to "gattServerStarted",
+            "transport" to "ble_gatt",
+            "platform" to "android",
+            "addServiceRequested" to added
+        ))
         return true
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            val ok = status == BluetoothGatt.GATT_SUCCESS
+            emit(mapOf(
+                "type" to if (ok) "gattServiceReady" else "gattServiceAddFailed",
+                "transport" to "ble_gatt",
+                "platform" to "android",
+                "status" to status,
+                "serviceUuid" to service.uuid.toString()
+            ))
+
+            if (ok && service.uuid == serviceUuid) {
+                mainHandler.post { startAdvertising() }
+            }
+        }
+
         @SuppressLint("MissingPermission")
         override fun onCharacteristicReadRequest(
             device: BluetoothDevice,
@@ -248,9 +298,25 @@ class ProxiMeetBeaconPlugin(
                 return
             }
 
-            val full = currentToken.toByteArray(Charsets.UTF_8)
-            val value = if (offset in full.indices) full.copyOfRange(offset, full.size) else ByteArray(0)
+            val value = when {
+                offset < 0 -> null
+                offset > currentTokenBytes.size -> null
+                offset == currentTokenBytes.size -> ByteArray(0)
+                else -> currentTokenBytes.copyOfRange(offset, currentTokenBytes.size)
+            }
+
+            if (value == null) {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, offset, null)
+                return
+            }
+
             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+            emit(mapOf(
+                "type" to "tokenReadServed",
+                "transport" to "ble_gatt",
+                "platform" to "android",
+                "bytes" to currentTokenBytes.size
+            ))
         }
     }
 
@@ -258,6 +324,7 @@ class ProxiMeetBeaconPlugin(
     private fun startAdvertising(): Boolean {
         val adv = advertiser ?: return false
         if (!hasAdvertisePermission()) return false
+        if (isAdvertisingStarted || advertiseCallback != null) return true
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
@@ -273,16 +340,14 @@ class ProxiMeetBeaconPlugin(
 
         advertiseCallback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
+                isAdvertisingStarted = true
                 emit(mapOf("type" to "advertisingStarted", "transport" to "ble_gatt", "platform" to "android"))
             }
 
             override fun onStartFailure(errorCode: Int) {
-                emit(mapOf(
-                    "type" to "advertisingFailed",
-                    "transport" to "ble_gatt",
-                    "platform" to "android",
-                    "errorCode" to errorCode
-                ))
+                isAdvertisingStarted = false
+                advertiseCallback = null
+                emit(mapOf("type" to "advertisingFailed", "transport" to "ble_gatt", "platform" to "android", "errorCode" to errorCode))
             }
         }
 
@@ -311,34 +376,19 @@ class ProxiMeetBeaconPlugin(
                 .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
         }
 
-        val filters = listOf(
-            ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(serviceUuid))
-                .build()
-        )
-
         scanCallback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                handleScanResult(result)
-            }
-
-            override fun onBatchScanResults(results: MutableList<ScanResult>) {
-                results.forEach { handleScanResult(it) }
-            }
-
+            override fun onScanResult(callbackType: Int, result: ScanResult) = handleScanResult(result)
+            override fun onBatchScanResults(results: MutableList<ScanResult>) = results.forEach { handleScanResult(it) }
             override fun onScanFailed(errorCode: Int) {
-                emit(mapOf(
-                    "type" to "scanFailed",
-                    "transport" to "ble_gatt",
-                    "platform" to "android",
-                    "errorCode" to errorCode
-                ))
+                emit(mapOf("type" to "scanFailed", "transport" to "ble_gatt", "platform" to "android", "errorCode" to errorCode))
             }
         }
 
         return try {
-            bleScanner.startScan(filters, settingsBuilder.build(), scanCallback)
-            emit(mapOf("type" to "scanStarted", "transport" to "ble_gatt", "platform" to "android"))
+            // No hardware filter: su diversi Android il filtro su UUID 128-bit rallenta o perde advertising iOS.
+            // Filtriamo manualmente sotto con scanRecord.serviceUuids.
+            bleScanner.startScan(null, settingsBuilder.build(), scanCallback)
+            emit(mapOf("type" to "scanStarted", "transport" to "ble_gatt", "platform" to "android", "filter" to "manual_service_uuid"))
             true
         } catch (e: Exception) {
             emit(mapOf("type" to "scanException", "platform" to "android", "error" to e.message))
@@ -347,18 +397,56 @@ class ProxiMeetBeaconPlugin(
     }
 
     @SuppressLint("MissingPermission")
+    private fun restartScanningBestEffort() {
+        val cb = scanCallback ?: return
+        val bleScanner = scanner ?: return
+        try { bleScanner.stopScan(cb) } catch (_: Exception) {}
+        try {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setReportDelay(0)
+                .apply {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+                        setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+                        setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
+                    }
+                }
+                .build()
+            bleScanner.startScan(null, settings, cb)
+            emit(mapOf("type" to "scanRestarted", "transport" to "ble_gatt", "platform" to "android"))
+        } catch (e: Exception) {
+            emit(mapOf("type" to "scanRestartException", "platform" to "android", "error" to e.message))
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     private fun handleScanResult(result: ScanResult) {
-        if (!isStarted) return
-        if (!hasConnectPermission()) return
+        if (!isStarted || !hasConnectPermission()) return
+
+        val record = result.scanRecord ?: return
+        val advertisedServices = record.serviceUuids?.map { it.uuid } ?: emptyList()
+        if (!advertisedServices.contains(serviceUuid)) return
 
         val device = result.device ?: return
         val address = device.address ?: return
         val now = System.currentTimeMillis()
 
-        if (now - (lastReadAt[address] ?: 0L) < readThrottleMs) return
+        if (now - (lastSuccessAt[address] ?: 0L) < successfulReadThrottleMs) return
+        if (now - (lastAttemptAt[address] ?: 0L) < connectRetryMs) return
         if (activeGatts.containsKey(address)) return
 
         resultRssi[address] = result.rssi
+        lastAttemptAt[address] = now
+
+        emit(mapOf(
+            "type" to "scanMatch",
+            "transport" to "ble_gatt",
+            "platform" to "android",
+            "address" to redactAddress(address),
+            "rssi" to result.rssi,
+            "services" to advertisedServices.map { it.toString() }
+        ))
 
         try {
             val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -369,6 +457,8 @@ class ProxiMeetBeaconPlugin(
             if (gatt != null) activeGatts[address] = gatt
         } catch (e: Exception) {
             emit(mapOf("type" to "connectException", "platform" to "android", "error" to e.message))
+            activeGatts.remove(address)
+            discoveryStarted.remove(address)
         }
     }
 
@@ -377,12 +467,18 @@ class ProxiMeetBeaconPlugin(
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             val address = gatt.device.address
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                emit(mapOf("type" to "connectionStateFailed", "transport" to "ble_gatt", "platform" to "android", "address" to redactAddress(address), "status" to status, "newState" to newState))
                 closeGatt(address, gatt)
                 return
             }
 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                gatt.discoverServices()
+                if (discoveryStarted.add(address)) {
+                    emit(mapOf("type" to "connected", "transport" to "ble_gatt", "platform" to "android", "address" to redactAddress(address)))
+                    val started = try { gatt.discoverServices() } catch (_: Exception) { false }
+                    emit(mapOf("type" to "discoverServicesStarted", "transport" to "ble_gatt", "platform" to "android", "started" to started, "address" to redactAddress(address)))
+                    if (!started) closeGatt(address, gatt)
+                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 closeGatt(address, gatt)
             }
@@ -390,60 +486,48 @@ class ProxiMeetBeaconPlugin(
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            val address = gatt.device.address
+            val services = gatt.services?.map { it.uuid.toString().lowercase(Locale.US) } ?: emptyList()
+            emit(mapOf("type" to "servicesDiscovered", "transport" to "ble_gatt", "platform" to "android", "status" to status, "count" to services.size, "services" to services, "address" to redactAddress(address)))
+
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                closeGatt(gatt.device.address, gatt)
+                closeGatt(address, gatt)
                 return
             }
 
-            val characteristic = gatt
-                .getService(serviceUuid)
-                ?.getCharacteristic(tokenCharacteristicUuid)
-
+            val characteristic = gatt.getService(serviceUuid)?.getCharacteristic(tokenCharacteristicUuid)
             if (characteristic == null) {
-                closeGatt(gatt.device.address, gatt)
+                emit(mapOf("type" to "tokenCharacteristicMissing", "transport" to "ble_gatt", "platform" to "android", "address" to redactAddress(address), "serviceUuid" to serviceUuid.toString(), "characteristicUuid" to tokenCharacteristicUuid.toString()))
+                closeGatt(address, gatt)
                 return
             }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.readCharacteristic(characteristic)
-            } else {
-                @Suppress("DEPRECATION")
-                gatt.readCharacteristic(characteristic)
-            }
+            val started = try { gatt.readCharacteristic(characteristic) } catch (_: Exception) { false }
+            emit(mapOf("type" to "tokenReadStarted", "transport" to "ble_gatt", "platform" to "android", "started" to started, "address" to redactAddress(address)))
+            if (!started) closeGatt(address, gatt)
         }
 
         @Deprecated("Deprecated in Android 13, kept for API compatibility")
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             @Suppress("DEPRECATION")
             handleCharacteristicRead(gatt, characteristic.uuid, characteristic.value, status)
         }
 
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
             handleCharacteristicRead(gatt, characteristic.uuid, value, status)
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun handleCharacteristicRead(
-        gatt: BluetoothGatt,
-        characteristicUuid: UUID,
-        value: ByteArray?,
-        status: Int
-    ) {
+    private fun handleCharacteristicRead(gatt: BluetoothGatt, characteristicUuid: UUID, value: ByteArray?, status: Int) {
         val address = gatt.device.address
+        val bytes = value?.size ?: 0
+        emit(mapOf("type" to "tokenReadComplete", "transport" to "ble_gatt", "platform" to "android", "status" to status, "bytes" to bytes, "address" to redactAddress(address)))
+
         if (status == BluetoothGatt.GATT_SUCCESS && characteristicUuid == tokenCharacteristicUuid) {
             val token = if (value != null) String(value, Charsets.UTF_8).trim() else ""
             if (token.isNotEmpty() && token != currentToken) {
-                lastReadAt[address] = System.currentTimeMillis()
+                lastSuccessAt[address] = System.currentTimeMillis()
                 emit(mapOf(
                     "type" to "gattPeer",
                     "transport" to "ble_gatt",
@@ -451,6 +535,8 @@ class ProxiMeetBeaconPlugin(
                     "token" to token,
                     "rssi" to (resultRssi[address] ?: -90)
                 ))
+            } else if (token == currentToken) {
+                emit(mapOf("type" to "selfTokenIgnored", "transport" to "ble_gatt", "platform" to "android", "address" to redactAddress(address)))
             }
         }
         closeGatt(address, gatt)
@@ -459,6 +545,7 @@ class ProxiMeetBeaconPlugin(
     @SuppressLint("MissingPermission")
     private fun closeGatt(address: String, gatt: BluetoothGatt) {
         activeGatts.remove(address)
+        discoveryStarted.remove(address)
         try { gatt.disconnect() } catch (_: Exception) {}
         try { gatt.close() } catch (_: Exception) {}
     }
@@ -470,23 +557,17 @@ class ProxiMeetBeaconPlugin(
     private fun hasScanPermissions(): Boolean {
         val locationOk = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            hasPermission(Manifest.permission.BLUETOOTH_SCAN) &&
-                hasPermission(Manifest.permission.BLUETOOTH_CONNECT) &&
-                locationOk
+            hasPermission(Manifest.permission.BLUETOOTH_SCAN) && hasPermission(Manifest.permission.BLUETOOTH_CONNECT) && locationOk
         } else {
             locationOk
         }
     }
 
-    private fun hasConnectPermission(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    }
+    private fun hasConnectPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S || hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
 
-    private fun hasAdvertisePermission(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
-    }
+    private fun hasAdvertisePermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.S || hasPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
 
     private fun missingScanPermissionsMessage(): String {
         val missing = mutableListOf<String>()
@@ -507,12 +588,17 @@ class ProxiMeetBeaconPlugin(
             locationManager.isLocationEnabled
         } else {
             try {
-                locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
-                    locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+                locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER) || locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
             } catch (_: Exception) {
                 false
             }
         }
+    }
+
+    private fun redactAddress(address: String?): String {
+        if (address.isNullOrBlank()) return "unknown"
+        val parts = address.split(":")
+        return if (parts.size >= 2) "**:**:**:**:${parts[parts.size - 2]}:${parts.last()}" else "***"
     }
 
     companion object {

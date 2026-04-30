@@ -57,8 +57,11 @@ class EventSessionService {
       PresenceHeartbeatService.instance.start(eventId: eventId, uid: uid);
       _isInEvent = true;
 
-      await _startBleGattBestEffort(token);
+      // Importante per rilevamento rapido: il listener Dart deve essere attivo
+      // prima che il plugin nativo inizi a emettere gattPeer. Altrimenti le prime
+      // detection possono perdersi e l'utente vede il peer solo dopo retry successivi.
       await _startNearbyBestEffort(eventId: eventId, uid: uid, token: token);
+      await _startBleGattBestEffort(token);
 
       Log.d('SESSION', 'Join completato con successo');
       return true;

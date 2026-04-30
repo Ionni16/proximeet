@@ -23,9 +23,15 @@ import CoreBluetooth
   }
 }
 
-/// BLE GATT bidirezionale:
-/// - Peripheral/GATT server: pubblica un Service UUID fisso e una characteristic leggibile con token temporaneo.
-/// - Central/GATT client: scansiona lo stesso Service UUID, si connette e legge la characteristic token.
+/// ProxiMeet BLE GATT bidirezionale.
+///
+/// Foreground/radar mode:
+/// - Peripheral: pubblica un GATT service fisso e una characteristic read-only con token temporaneo.
+/// - Central: scansiona lo stesso service, si connette, legge la characteristic e invia gattPeer a Dart.
+///
+/// Nota critica: su iOS l'advertising parte SOLO dopo il callback didAdd service.
+/// Se si avvia l'advertising prima, Android può connettersi quando il service GATT non è ancora pronto
+/// e chiudere la connessione senza detection.
 final class ProxiMeetBeaconPlugin: NSObject,
                                     FlutterStreamHandler,
                                     CBPeripheralManagerDelegate,
@@ -34,15 +40,8 @@ final class ProxiMeetBeaconPlugin: NSObject,
   static let shared = ProxiMeetBeaconPlugin()
 
   static func register(with messenger: FlutterBinaryMessenger) {
-    let methodChannel = FlutterMethodChannel(
-      name: "proximeet/beacon",
-      binaryMessenger: messenger
-    )
-
-    let eventChannel = FlutterEventChannel(
-      name: "proximeet/beacon_events",
-      binaryMessenger: messenger
-    )
+    let methodChannel = FlutterMethodChannel(name: "proximeet/beacon", binaryMessenger: messenger)
+    let eventChannel = FlutterEventChannel(name: "proximeet/beacon_events", binaryMessenger: messenger)
 
     methodChannel.setMethodCallHandler { call, result in
       switch call.method {
@@ -88,12 +87,21 @@ final class ProxiMeetBeaconPlugin: NSObject,
   private var tokenCharacteristicUuid: CBUUID?
   private var currentTokenData: Data?
   private var isStarted = false
+  private var gattServiceAdded = false
+  private var isAdvertising = false
+  private var isScanning = false
 
   private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
   private var peripheralRssi: [UUID: Int] = [:]
+  private var connectionInFlight = Set<UUID>()
+  private var lastAttemptAt: [UUID: TimeInterval] = [:]
   private var lastReadAt: [UUID: TimeInterval] = [:]
 
-  private let readThrottleSeconds: TimeInterval = 3.0
+  private var scanRestartTimer: Timer?
+
+  private let connectRetrySeconds: TimeInterval = 2.0
+  private let successfulReadThrottleSeconds: TimeInterval = 2.5
+  private let scanRestartSeconds: TimeInterval = 12.0
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
@@ -119,7 +127,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
       result(FlutterError(code: "BAD_CHARACTERISTIC_UUID", message: "Characteristic UUID non valido", details: characteristicUuidString))
       return
     }
-    guard let data = token.data(using: .utf8), data.count <= 180 else {
+    guard let data = token.data(using: .utf8), data.count > 0, data.count <= 180 else {
       result(FlutterError(code: "BAD_TOKEN", message: "Token non valido o troppo lungo", details: token.count))
       return
     }
@@ -130,6 +138,9 @@ final class ProxiMeetBeaconPlugin: NSObject,
     tokenCharacteristicUuid = CBUUID(string: characteristicUuidString)
     currentTokenData = data
     isStarted = true
+    gattServiceAdded = false
+    isAdvertising = false
+    isScanning = false
 
     peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
     centralManager = CBCentralManager(delegate: self, queue: .main)
@@ -139,6 +150,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
       "transport": "ble_gatt",
       "platform": "ios",
       "serviceUuid": serviceUuidString,
+      "characteristicUuid": characteristicUuidString,
       "tokenLength": token.count
     ])
 
@@ -150,6 +162,9 @@ final class ProxiMeetBeaconPlugin: NSObject,
   }
 
   private func stopInternal(emitStopped: Bool) {
+    scanRestartTimer?.invalidate()
+    scanRestartTimer = nil
+
     if let central = centralManager {
       central.stopScan()
       for peripheral in discoveredPeripherals.values {
@@ -164,13 +179,20 @@ final class ProxiMeetBeaconPlugin: NSObject,
     peripheralManager = nil
     discoveredPeripherals.removeAll()
     peripheralRssi.removeAll()
+    connectionInFlight.removeAll()
+    lastAttemptAt.removeAll()
     lastReadAt.removeAll()
     isStarted = false
+    gattServiceAdded = false
+    isAdvertising = false
+    isScanning = false
 
     if emitStopped {
       emit(["type": "stopped", "transport": "ble_gatt", "platform": "ios"])
     }
   }
+
+  // MARK: - Peripheral/GATT server
 
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
     guard isStarted else { return }
@@ -180,15 +202,18 @@ final class ProxiMeetBeaconPlugin: NSObject,
       return
     }
 
-    startGattServerAndAdvertising()
+    createGattService()
   }
 
-  private func startGattServerAndAdvertising() {
+  private func createGattService() {
     guard let peripheralManager = peripheralManager,
           let serviceUuid = serviceUuid,
           let tokenCharacteristicUuid = tokenCharacteristicUuid else { return }
 
+    peripheralManager.stopAdvertising()
     peripheralManager.removeAllServices()
+    gattServiceAdded = false
+    isAdvertising = false
 
     let characteristic = CBMutableCharacteristic(
       type: tokenCharacteristicUuid,
@@ -201,11 +226,43 @@ final class ProxiMeetBeaconPlugin: NSObject,
     service.characteristics = [characteristic]
     peripheralManager.add(service)
 
-    peripheralManager.startAdvertising([
-      CBAdvertisementDataServiceUUIDsKey: [serviceUuid],
-      CBAdvertisementDataLocalNameKey: "ProxiMeet"
-    ])
+    emit(["type": "gattServiceAddRequested", "transport": "ble_gatt", "platform": "ios"])
+  }
 
+  func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+    if let error = error {
+      emit(["type": "gattServiceAddFailed", "transport": "ble_gatt", "platform": "ios", "error": error.localizedDescription])
+      return
+    }
+
+    gattServiceAdded = true
+    emit(["type": "gattServiceReady", "transport": "ble_gatt", "platform": "ios", "serviceUuid": service.uuid.uuidString])
+    startAdvertisingIfReady()
+  }
+
+  private func startAdvertisingIfReady() {
+    guard isStarted,
+          gattServiceAdded,
+          !isAdvertising,
+          let peripheralManager = peripheralManager,
+          peripheralManager.state == .poweredOn,
+          let serviceUuid = serviceUuid else { return }
+
+    // Payload minimale: niente LocalName. Con UUID 128-bit + local name si rischia overflow/scan-response
+    // e alcuni Android con scan filter diventano lenti o instabili.
+    peripheralManager.startAdvertising([
+      CBAdvertisementDataServiceUUIDsKey: [serviceUuid]
+    ])
+  }
+
+  func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+    if let error = error {
+      isAdvertising = false
+      emit(["type": "advertisingFailed", "transport": "ble_gatt", "platform": "ios", "error": error.localizedDescription])
+      return
+    }
+
+    isAdvertising = true
     emit(["type": "advertisingStarted", "transport": "ble_gatt", "platform": "ios"])
   }
 
@@ -217,9 +274,18 @@ final class ProxiMeetBeaconPlugin: NSObject,
       return
     }
 
-    request.value = data
+    if request.offset > data.count {
+      peripheral.respond(to: request, withResult: .invalidOffset)
+      return
+    }
+
+    request.value = data.subdata(in: request.offset..<data.count)
     peripheral.respond(to: request, withResult: .success)
+
+    emit(["type": "tokenReadServed", "transport": "ble_gatt", "platform": "ios", "bytes": data.count])
   }
+
+  // MARK: - Central/GATT client
 
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
     guard isStarted else { return }
@@ -230,6 +296,7 @@ final class ProxiMeetBeaconPlugin: NSObject,
     }
 
     startScanning()
+    startScanRestartTimer()
   }
 
   private func startScanning() {
@@ -241,7 +308,19 @@ final class ProxiMeetBeaconPlugin: NSObject,
       options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
     )
 
+    isScanning = true
     emit(["type": "scanStarted", "transport": "ble_gatt", "platform": "ios"])
+  }
+
+  private func startScanRestartTimer() {
+    scanRestartTimer?.invalidate()
+    scanRestartTimer = Timer.scheduledTimer(withTimeInterval: scanRestartSeconds, repeats: true) { [weak self] _ in
+      guard let self = self, self.isStarted, let central = self.centralManager, central.state == .poweredOn else { return }
+      central.stopScan()
+      self.isScanning = false
+      self.startScanning()
+      self.emit(["type": "scanRestarted", "transport": "ble_gatt", "platform": "ios"])
+    }
   }
 
   func centralManager(
@@ -255,81 +334,124 @@ final class ProxiMeetBeaconPlugin: NSObject,
     let rssi = RSSI.intValue
     guard rssi > -100 else { return }
 
-    peripheralRssi[peripheral.identifier] = rssi
-
+    let id = peripheral.identifier
     let now = Date().timeIntervalSince1970
-    if let last = lastReadAt[peripheral.identifier], now - last < readThrottleSeconds {
-      return
-    }
 
-    discoveredPeripherals[peripheral.identifier] = peripheral
+    if let lastRead = lastReadAt[id], now - lastRead < successfulReadThrottleSeconds { return }
+    if let lastAttempt = lastAttemptAt[id], now - lastAttempt < connectRetrySeconds { return }
+    if connectionInFlight.contains(id) { return }
+
+    peripheralRssi[id] = rssi
+    discoveredPeripherals[id] = peripheral
     peripheral.delegate = self
+    connectionInFlight.insert(id)
+    lastAttemptAt[id] = now
+
+    emit(["type": "scanMatch", "transport": "ble_gatt", "platform": "ios", "rssi": rssi])
 
     if peripheral.state == .connected {
       peripheral.discoverServices([serviceUuid].compactMap { $0 })
     } else {
-      central.connect(peripheral, options: nil)
+      central.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnConnectionKey: false])
     }
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    emit(["type": "connected", "transport": "ble_gatt", "platform": "ios"])
     peripheral.discoverServices([serviceUuid].compactMap { $0 })
   }
 
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-    emit(["type": "connectFailed", "platform": "ios", "error": error?.localizedDescription ?? "unknown"])
+    connectionInFlight.remove(peripheral.identifier)
+    emit(["type": "connectFailed", "transport": "ble_gatt", "platform": "ios", "error": error?.localizedDescription ?? "unknown"])
+  }
+
+  func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+    connectionInFlight.remove(peripheral.identifier)
+    if let error = error {
+      emit(["type": "disconnected", "transport": "ble_gatt", "platform": "ios", "error": error.localizedDescription])
+    }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     if let error = error {
-      emit(["type": "discoverServicesFailed", "platform": "ios", "error": error.localizedDescription])
+      finishPeripheral(peripheral, event: ["type": "discoverServicesFailed", "transport": "ble_gatt", "platform": "ios", "error": error.localizedDescription])
       return
     }
 
-    guard let tokenCharacteristicUuid = tokenCharacteristicUuid else { return }
+    guard let tokenCharacteristicUuid = tokenCharacteristicUuid else {
+      finishPeripheral(peripheral, event: ["type": "badState", "transport": "ble_gatt", "platform": "ios", "stage": "missingCharacteristicUuid"])
+      return
+    }
 
-    for service in peripheral.services ?? [] {
+    let services = peripheral.services ?? []
+    emit(["type": "servicesDiscovered", "transport": "ble_gatt", "platform": "ios", "count": services.count])
+
+    guard !services.isEmpty else {
+      finishPeripheral(peripheral, event: ["type": "serviceMissing", "transport": "ble_gatt", "platform": "ios"])
+      return
+    }
+
+    for service in services {
       peripheral.discoverCharacteristics([tokenCharacteristicUuid], for: service)
     }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
     if let error = error {
-      emit(["type": "discoverCharacteristicsFailed", "platform": "ios", "error": error.localizedDescription])
+      finishPeripheral(peripheral, event: ["type": "discoverCharacteristicsFailed", "transport": "ble_gatt", "platform": "ios", "error": error.localizedDescription])
       return
     }
 
     guard let tokenCharacteristicUuid = tokenCharacteristicUuid else { return }
 
     for characteristic in service.characteristics ?? [] where characteristic.uuid == tokenCharacteristicUuid {
+      emit(["type": "tokenReadStarted", "transport": "ble_gatt", "platform": "ios"])
       peripheral.readValue(for: characteristic)
+      return
     }
+
+    finishPeripheral(peripheral, event: ["type": "tokenCharacteristicMissing", "transport": "ble_gatt", "platform": "ios", "serviceUuid": service.uuid.uuidString])
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
     if let error = error {
-      emit(["type": "readFailed", "platform": "ios", "error": error.localizedDescription])
+      finishPeripheral(peripheral, event: ["type": "readFailed", "transport": "ble_gatt", "platform": "ios", "error": error.localizedDescription])
       return
     }
 
     guard let tokenCharacteristicUuid = tokenCharacteristicUuid,
           characteristic.uuid == tokenCharacteristicUuid,
           let data = characteristic.value,
-          let token = String(data: data, encoding: .utf8),
-          !token.isEmpty else { return }
+          let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !token.isEmpty else {
+      finishPeripheral(peripheral, event: ["type": "tokenReadEmpty", "transport": "ble_gatt", "platform": "ios"])
+      return
+    }
 
     lastReadAt[peripheral.identifier] = Date().timeIntervalSince1970
     let rssi = peripheralRssi[peripheral.identifier] ?? -90
 
-    emit([
-      "type": "gattPeer",
-      "transport": "ble_gatt",
-      "platform": "ios",
-      "token": token,
-      "rssi": rssi
-    ])
+    emit(["type": "tokenReadComplete", "transport": "ble_gatt", "platform": "ios", "bytes": data.count])
 
-    if let central = centralManager {
+    let myToken = currentTokenData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    if token != myToken {
+      emit([
+        "type": "gattPeer",
+        "transport": "ble_gatt",
+        "platform": "ios",
+        "token": token,
+        "rssi": rssi
+      ])
+    }
+
+    finishPeripheral(peripheral, event: nil)
+  }
+
+  private func finishPeripheral(_ peripheral: CBPeripheral, event: [String: Any]?) {
+    if let event = event { emit(event) }
+    connectionInFlight.remove(peripheral.identifier)
+    if let central = centralManager, peripheral.state == .connected || peripheral.state == .connecting {
       central.cancelPeripheralConnection(peripheral)
     }
   }
