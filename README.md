@@ -25,7 +25,7 @@
 
 **Frontend**
 - [Flutter](https://flutter.dev/) — cross-platform (iOS + Android)
-- Dart 3.x
+- Dart
 
 **Backend / Cloud**
 - [Firebase Auth](https://firebase.google.com/products/auth) — login/registrazione
@@ -43,7 +43,7 @@
 - `mobile_scanner` + `qr_flutter` — QR code
 - `permission_handler` — gestione permessi runtime
 - `cached_network_image` — avatar con cache
-- `uuid` — token di prossimità efimeri
+- `uuid` — token di prossimità 
 
 ---
 
@@ -87,7 +87,7 @@ ios/                # Implementazione Swift per BLE/GATT nativo
 - Flutter SDK `^3.11.4`
 - Node.js 20+ (per le Cloud Functions)
 - Firebase CLI (`npm install -g firebase-tools`)
-- Un progetto Firebase configurato (chiedi le credenziali o configura il tuo)
+
 
 ### Installazione
 
