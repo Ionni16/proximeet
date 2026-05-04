@@ -1,93 +1,188 @@
-# ProxiMeet
+# 📡 ProxiMeet
 
+> **Tesi di laurea @ Università degli Studi dell'Insubria**  
+> Relatore: Prof. Davide Tosi
 
+**ProxiMeet** è un'app mobile cross-platform (Flutter) che ti permette di scoprire le persone intorno a te durante eventi e conferenze — senza dover scambiare numeri o usare le app solite. Basta aprire l'app, entrare nell'evento, e il tuo telefono "vede" chi ti sta vicino via **Bluetooth Low Energy (BLE)**. Da lì puoi mandare la tua card digitale con un tap.
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## ✨ Funzionalità principali
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+| Cosa fa | Come |
+|---|---|
+| 🔵 **Radar BLE** | Mostra le persone vicine in tempo reale su un radar animato |
+| 📇 **Card digitali** | Profilo con nome, azienda, ruolo, bio e link social |
+| 🤝 **Scambio contatti** | Richiesta con un tap → notifica push → accetta o rifiuta |
+| 👛 **Wallet** | Tutti i contatti salvati in un posto solo |
+| 📸 **Scanner QR** | Aggiungi qualcuno anche scansionando il suo QR code |
+| 🔔 **Notifiche push** | Firebase Cloud Messaging per richieste e conferme |
+| 🕐 **Presenza live** | Heartbeat ogni 30 secondi per sapere chi è ancora in zona |
 
-## Add your files
+---
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## 🧱 Stack tecnologico
+
+**Frontend**
+- [Flutter](https://flutter.dev/) — cross-platform (iOS + Android)
+- Dart 3.x
+
+**Backend / Cloud**
+- [Firebase Auth](https://firebase.google.com/products/auth) — login/registrazione
+- [Cloud Firestore](https://firebase.google.com/products/firestore) — database realtime
+- [Firebase Storage](https://firebase.google.com/products/storage) — avatar e immagini
+- [Firebase Cloud Messaging](https://firebase.google.com/products/cloud-messaging) — notifiche push
+- [Firebase Cloud Functions](https://firebase.google.com/products/functions) — logica serverless (Node.js 20)
+
+**BLE / Prossimità**
+- [`flutter_blue_plus`](https://pub.dev/packages/flutter_blue_plus) — scanning BLE
+- [`flutter_ble_peripheral`](https://pub.dev/packages/flutter_ble_peripheral) — advertising BLE
+- Codice nativo Swift (iOS) e Kotlin/Java (Android) per operazioni GATT avanzate
+
+**Altre dipendenze notevoli**
+- `mobile_scanner` + `qr_flutter` — QR code
+- `permission_handler` — gestione permessi runtime
+- `cached_network_image` — avatar con cache
+- `uuid` — token di prossimità efimeri
+
+---
+
+## 📁 Struttura del progetto
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/uebb/ProxiMeet.git
-git branch -M main
-git push -uf origin main
+lib/
+├── core/           # Costanti (UUID BLE, timeout), logger, error handler
+├── models/         # Data classes: UserModel, EventModel, NearbyUser, ConnectionModel
+├── services/       # Tutta la logica — singleton services
+├── screens/        # UI organizzata per feature
+│   ├── auth/       # Login, registrazione
+│   ├── events/     # Lista eventi
+│   ├── home/       # Radar, tab nearby, wallet, profilo
+│   ├── profile/    # Modifica profilo
+│   └── wallet/     # Contatti salvati
+└── widgets/        # Componenti riutilizzabili (avatar, card, ecc.)
+
+functions/          # Firebase Cloud Functions (Node.js)
+android/            # Permessi BLE nel manifest + codice nativo Android
+ios/                # Implementazione Swift per BLE/GATT nativo
 ```
 
-## Integrate with your tools
+---
 
-* [Set up project integrations](https://gitlab.com/uebb/ProxiMeet/-/settings/integrations)
+## 🔄 Come funziona il BLE (in breve)
 
-## Collaborate with your team
+1. Quando entri in un evento, l'app scrive un **token di prossimità** su Firestore (stringa di 64 caratteri univoca per sessione)
+2. Il token viene **broadcastato via GATT** attraverso BLE advertising
+3. I dispositivi vicini lo **scansionano**, leggono la caratteristica GATT e risolvono il token → profilo utente su Firestore
+4. Il segnale RSSI viene **smussato con EWMA** (α=0.3) per evitare jitter
+5. Utenti non visti da **>60 secondi** vengono rimossi dalla lista
+6. Quando esci dall'evento, advertising/scanning si fermano e i record di presenza vengono eliminati
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+---
 
-## Test and Deploy
+## 🚀 Setup e avvio
 
-Use the built-in continuous integration in GitLab.
+### Prerequisiti
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+- Flutter SDK `^3.11.4`
+- Node.js 20+ (per le Cloud Functions)
+- Firebase CLI (`npm install -g firebase-tools`)
+- Un progetto Firebase configurato (chiedi le credenziali o configura il tuo)
 
-***
+### Installazione
 
-# Editing this README
+```bash
+# 1. Clona il repo
+git clone https://github.com/Ionni16/proximeet.git
+cd proximeet
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+# 2. Installa le dipendenze Flutter
+flutter pub get
 
-## Suggestions for a good README
+# 3. Installa le dipendenze delle Cloud Functions
+cd functions && npm install && cd ..
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+### Avvio in sviluppo
 
-## Name
-Choose a self-explaining name for your project.
+```bash
+# Avvia su dispositivo/emulatore connesso
+flutter run
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# Analisi statica
+flutter analyze
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### Build
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```bash
+flutter build apk          # Android APK
+flutter build ipa          # iOS IPA
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+### Cloud Functions
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```bash
+cd functions
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+# Sviluppo locale con emulatori
+firebase emulators:start --only functions
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# Deploy in produzione
+firebase deploy --only functions
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+# Tail dei log live
+firebase functions:log
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+---
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## ☁️ Cloud Functions
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+| Funzione | Trigger | Cosa fa |
+|---|---|---|
+| `sendCardRequest` | Callable | Manda notifica push quando A vuole scambiare la card con B |
+| `respondCardRequest` | Callable | Notifica quando B accetta/rifiuta + scrive la connessione su Firestore |
+| `cleanupOldDetections` | Ogni ora | Rimuove i record BLE obsoleti |
+| `cleanupStalePresence` | Ogni 5 min | Marca come inattivi gli utenti senza heartbeat da >5 min |
 
-## License
-For open source projects, say how it is licensed.
+---
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+## 🗄️ Modello dati Firestore
+
+```
+users/{uid}                         ← profilo completo
+users/{uid}/summary                 ← snapshot leggero per le liste
+events/{eventId}                    ← metadati evento
+events/{eventId}/presence/{uid}     ← presenza con lastHeartbeat
+proximityTokens/{token}             ← mappa token BLE → uid + eventId
+connections/{uid}/contacts/{uid2}   ← contatti accettati
+connectionRequests/{requestId}      ← richieste in attesa
+```
+
+---
+
+## ⚠️ Limitazioni note
+
+- **iOS in background**: quando l'app va in background, iOS smette di fare BLE advertising iBeacon. Questo significa che un dispositivo iOS non viene rilevato da dispositivi Android se non è in primo piano. Android→Android e Android→iOS funzionano regolarmente.
+- **BLE advertising su alcuni Android**: alcuni OEM (es. Xiaomi, Huawei) impongono throttling aggressivo allo scanning BLE in background. Risultati migliori con l'app in foreground.
+- L'app non è ancora pubblicata su App Store / Google Play — è un prototipo di tesi.
+
+---
+
+## 🏗️ Pattern architetturali
+
+- **Singleton services** — tutti i service si usano tramite `NomeService.instance`, mai istanziati direttamente
+- **Streams** — la UI si aggiorna in tempo reale tramite `StreamBuilder` su snapshot Firestore
+- **Logging** — si usa sempre `Log.debug()`, `Log.warn()`, `Log.error()` da `core/logger.dart`, mai `print()`
+- **Costanti BLE** — UUID e timing vivono in `core/constants.dart`, non inline nel codice
+
+---
+
+## 👤 Autore
+
+**Ionut** — sviluppato come progetto di tesi triennale 
+Università degli Studi dell'Insubria | Relatore: Prof. Davide Tosi
+
+---
+
