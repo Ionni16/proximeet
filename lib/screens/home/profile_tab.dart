@@ -11,7 +11,7 @@ import '../../widgets/user_avatar.dart';
 import '../profile/edit_profile_screen.dart';
 import 'qr_scanner_screen.dart';
 
-/// Tab Profilo: avatar, info, QR mostra/scansiona, modifica, esci.
+/// Tab del profilo: dati utente, QR, bottoni per modifica e uscita evento.
 class ProfileTab extends StatelessWidget {
   final UserModel currentUser;
   const ProfileTab({super.key, required this.currentUser});
@@ -58,11 +58,11 @@ class _ProfileContentState extends State<_ProfileContent> {
       if (uid == null) return;
       final url = await StorageService.instance.uploadAvatar(uid, file);
       if (url != null) {
-        // 1. Aggiorna profilo principale in users/
+        // 1. Aggiorna il documento principale su Firestore
         await AuthService.instance.updateAvatar(uid, url);
 
-        // 2. Aggiorna anche il bleMapping nell'evento corrente
-        // così gli altri partecipanti vedono subito la nuova foto
+        // 2. Aggiorna anche il token BLE nell'evento corrente
+        //    così gli altri vedono subito la nuova foto
         await EventSessionService.instance.updateMyProfileInEvent({
           'avatarURL': url,
         });
@@ -89,7 +89,7 @@ class _ProfileContentState extends State<_ProfileContent> {
         children: [
           const SizedBox(height: 16),
 
-          // Avatar
+          // Avatar con badge per cambiare foto
           GestureDetector(
             onTap: _changePhoto,
             child: UserAvatar(
@@ -130,7 +130,7 @@ class _ProfileContentState extends State<_ProfileContent> {
 
           const SizedBox(height: 14),
 
-          // ── QR Mostra + QR Scansiona + Modifica ──
+          // Bottoni QR e modifica profilo
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -181,7 +181,7 @@ class _ProfileContentState extends State<_ProfileContent> {
 
           const SizedBox(height: 24),
 
-          // Info sections
+          // Sezioni con i dettagli del profilo
           _SectionHeader('Contatti'),
           _InfoCard(
             icon: Icons.email_outlined,
@@ -236,7 +236,7 @@ class _ProfileContentState extends State<_ProfileContent> {
 
           const SizedBox(height: 24),
 
-          // Esci dall'evento
+          // Bottone per uscire dall'evento
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
@@ -338,7 +338,7 @@ class _ProfileContentState extends State<_ProfileContent> {
   }
 }
 
-// ── Componenti condivisi ────────────────────────────────────
+// ── Componenti riutilizzabili ───────────────────────────────
 
 class _SectionHeader extends StatelessWidget {
   final String title;

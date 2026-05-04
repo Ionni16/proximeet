@@ -111,10 +111,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         'bio': bio,
       };
 
-      // 1) Aggiorna profilo utente completo
+      // 1) Salva tutti i dati del profilo su Firestore
       await _authService.updateProfile(uid, updates);
 
-      // 2) Aggiorna solo il profilo pubblico nell'evento corrente
+      // 2) Aggiorna anche il profilo visibile agli altri nell'evento
       await EventSessionService.instance.updateMyProfileInEvent({
         'displayName': [firstName, lastName]
             .where((p) => p.isNotEmpty)

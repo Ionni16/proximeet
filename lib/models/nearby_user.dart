@@ -1,9 +1,8 @@
 import '../core/constants.dart';
 
-/// Utente rilevato via BLE nelle vicinanze.
-///
-/// Contiene sia i dati BLE (rssi, lastSeen) che i dati profilo
-/// risolti dal bleMapping Firestore.
+/// Persona rilevata via BLE nelle vicinanze.
+/// Ha sia i dati tecnici BLE (rssi, lastSeen) che il profilo
+/// caricato da Firestore tramite il token temporaneo.
 class NearbyUser {
   final String uid;
   final String displayName;
@@ -33,7 +32,7 @@ class NearbyUser {
 
   String get firstName => displayName.split(' ').first;
 
-  /// Distanza approssimativa leggibile.
+  /// Etichetta testuale della distanza stimata in base all'RSSI.
   String get distanceLabel {
     if (rssi >= AppConstants.rssiVeryClose) return 'Vicinissimo';
     if (rssi >= AppConstants.rssiClose) return 'Vicino';
@@ -41,7 +40,7 @@ class NearbyUser {
     return 'Lontano';
   }
 
-  /// Icona distanza.
+  /// Icona che rappresenta la forza del segnale BLE.
   String get distanceEmoji {
     if (rssi >= AppConstants.rssiVeryClose) return '📍';
     if (rssi >= AppConstants.rssiClose) return '📡';
@@ -49,7 +48,7 @@ class NearbyUser {
     return '🔭';
   }
 
-  /// Raggio proporzionale per il radar (0.0 – 1.0).
+  /// Dove posizionare l'utente sul radar: 0 = vicino, 1 = bordo.
   double get radarRadius {
     if (rssi >= AppConstants.rssiVeryClose) return 0.25;
     if (rssi >= AppConstants.rssiClose) return 0.50;
@@ -57,12 +56,12 @@ class NearbyUser {
     return 0.90;
   }
 
-  /// True se la detection è più vecchia di [seconds].
+  /// Torna true se non riceviamo segnale da questo utente da troppo tempo.
   bool isStale({int seconds = AppConstants.staleThresholdSeconds}) {
     return DateTime.now().difference(lastSeen).inSeconds > seconds;
   }
 
-  /// Quanto tempo fa è stato rilevato, in formato leggibile.
+  /// Stringa leggibile di quando è stato visto l'ultima volta (es. "2s fa").
   String get lastSeenLabel {
     final diff = DateTime.now().difference(lastSeen).inSeconds;
     if (diff < 5) return 'Adesso';
@@ -70,16 +69,15 @@ class NearbyUser {
     return '${diff ~/ 60}m fa';
   }
 
-  /// True se ha almeno un campo social compilato.
+  /// True se l'utente ha almeno un contatto social inserito.
   bool get hasSocials =>
       linkedin.isNotEmpty || email.isNotEmpty || phone.isNotEmpty;
 }
 
-/// Rilevazione BLE grezza, prima del resolve verso profilo utente.
+/// Dato grezzo che arriva dal BLE, prima di sapere a chi appartiene.
 class RawBleDetection {
-  /// Token BLE temporaneo letto via GATT.
-  ///
-  /// Il nome resta sessionBleId per compatibilità con i servizi esistenti.
+  /// Token temporaneo letto dalla characteristic GATT del peer.
+  /// Si chiama ancora sessionBleId per non rompere il codice che lo usa.
   final String sessionBleId;
   final int rssi;
   final DateTime timestamp;

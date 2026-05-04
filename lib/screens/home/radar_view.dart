@@ -5,7 +5,7 @@ import '../../models/user_model.dart';
 import '../../models/nearby_user.dart';
 import '../../widgets/user_avatar.dart';
 
-/// Vista radar con tema electric blue (in linea con il logo ProxiMeet).
+/// Radar animato che mostra le persone vicine come punti su uno schermo circolare.
 class RadarView extends StatefulWidget {
   final UserModel currentUser;
   final List<NearbyUser> nearbyUsers;
@@ -43,13 +43,13 @@ class _RadarViewState extends State<RadarView>
 
   @override
   Widget build(BuildContext context) {
-    // Palette electric blue — coerente col logo
+    // Colori del radar, stesso blu del logo dell'app
     const radarColor = Color(0xFF4D8EF7);
     const radarColorDim = Color(0x1A4D8EF7);
 
     return Column(
       children: [
-        // ── Radar ──
+        // Radar
         Expanded(
           child: Center(
             child: LayoutBuilder(
@@ -71,7 +71,7 @@ class _RadarViewState extends State<RadarView>
                       return Stack(
                         alignment: Alignment.center,
                         children: [
-                          // Background + griglia + sweep
+                          // Disegna sfondo, cerchi e linea rotante del radar
                           CustomPaint(
                             size: Size(size, size),
                             painter: _RadarPainter(
@@ -85,7 +85,7 @@ class _RadarViewState extends State<RadarView>
                             ),
                           ),
 
-                          // Dot utenti
+                          // Punti che rappresentano gli utenti rilevati
                           ...widget.nearbyUsers.asMap().entries.map((entry) {
                             final i = entry.key;
                             final nearby = entry.value;
@@ -117,7 +117,7 @@ class _RadarViewState extends State<RadarView>
                             );
                           }),
 
-                          // Avatar centrale
+                          // Avatar dell'utente corrente al centro del radar
                           Container(
                             width: 60,
                             height: 60,
@@ -163,7 +163,7 @@ class _RadarViewState extends State<RadarView>
           ),
         ),
 
-        // ── Strip orizzontale rilevati ──
+        // Barra orizzontale con la lista delle persone rilevate
         if (widget.nearbyUsers.isNotEmpty)
           Container(
             height: 96,
@@ -252,7 +252,7 @@ class _RadarViewState extends State<RadarView>
 }
 
 // ═══════════════════════════════════════════════════════════
-// RADAR PAINTER — electric blue theme
+// RADAR PAINTER — disegna il radar
 // ═══════════════════════════════════════════════════════════
 
 class _RadarPainter extends CustomPainter {
@@ -273,7 +273,7 @@ class _RadarPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final maxR = size.width / 2;
 
-    // ── Sfondo — deep navy, coerente col tema app ──
+    // Sfondo scuro del radar
     final bgPaint = Paint()
       ..shader = RadialGradient(
         colors: [
@@ -284,7 +284,7 @@ class _RadarPainter extends CustomPainter {
       ).createShader(Rect.fromCircle(center: center, radius: maxR));
     canvas.drawCircle(center, maxR, bgPaint);
 
-    // ── Cerchi concentrici ──
+    // Cerchi che indicano le fasce di distanza
     final ringPaint = Paint()
       ..color = radarColor.withOpacity(0.08)
       ..style = PaintingStyle.stroke
@@ -294,7 +294,7 @@ class _RadarPainter extends CustomPainter {
       canvas.drawCircle(center, maxR * frac, ringPaint);
     }
 
-    // ── Assi ──
+    // Linee orizzontale e verticale al centro
     final axisPaint = Paint()
       ..color = radarColor.withOpacity(0.06)
       ..strokeWidth = 0.6;
@@ -303,7 +303,7 @@ class _RadarPainter extends CustomPainter {
     canvas.drawLine(Offset(center.dx, center.dy - maxR),
         Offset(center.dx, center.dy + maxR), axisPaint);
 
-    // ── Diagonali ──
+    // Linee diagonali a 45°
     final diagPaint = Paint()
       ..color = radarColor.withOpacity(0.03)
       ..strokeWidth = 0.6;
@@ -313,7 +313,7 @@ class _RadarPainter extends CustomPainter {
     canvas.drawLine(Offset(center.dx + d, center.dy - d),
         Offset(center.dx - d, center.dy + d), diagPaint);
 
-    // ── Sweep arc con gradiente electric blue ──
+    // Arco della linea scanner con sfumatura (effetto radar)
     const sweepWidth = 1.1;
     final sweepRect = Rect.fromCircle(center: center, radius: maxR);
 
@@ -334,7 +334,7 @@ class _RadarPainter extends CustomPainter {
 
     canvas.drawArc(sweepRect, sweepAngle - sweepWidth, sweepWidth, true, sweepPaint);
 
-    // ── Linea scanner ──
+    // Linea che ruota come un radar vero
     final linePaint = Paint()
       ..color = radarColor.withOpacity(0.9)
       ..strokeWidth = 1.5
@@ -347,7 +347,7 @@ class _RadarPainter extends CustomPainter {
     );
     canvas.drawLine(center, lineEnd, linePaint);
 
-    // ── Glow linea scanner ──
+    // Alone luminoso sulla linea scanner
     final glowPaint = Paint()
       ..color = radarColor.withOpacity(0.18)
       ..strokeWidth = 8
@@ -356,7 +356,7 @@ class _RadarPainter extends CustomPainter {
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
     canvas.drawLine(center, lineEnd, glowPaint);
 
-    // ── Blip glow sui rilevati ──
+    // Alone luminoso sui punti quando la linea scanner ci passa sopra
     for (final pos in userPositions) {
       final dotAngle = atan2(pos.dy - center.dy, pos.dx - center.dx);
       var angleDiff = (sweepAngle - dotAngle) % (2 * pi);
@@ -371,13 +371,13 @@ class _RadarPainter extends CustomPainter {
       }
     }
 
-    // ── Centro glow ──
+    // Alone luminoso al centro del radar
     final centerGlow = Paint()
       ..color = radarColor.withOpacity(0.25)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
     canvas.drawCircle(center, 14, centerGlow);
 
-    // ── Etichette distanza ──
+    // Etichette testuali delle distanze (25m, 50m, 75m)
     final textPainter = TextPainter(textDirection: TextDirection.ltr);
     final labels = ['25m', '50m', '75m'];
     final fracs = [0.25, 0.50, 0.75];
@@ -404,7 +404,7 @@ class _RadarPainter extends CustomPainter {
 }
 
 // ═══════════════════════════════════════════════════════════
-// RADAR BLIP — dot utente electric blue
+// RADAR BLIP — pallino che rappresenta un utente sul radar
 // ═══════════════════════════════════════════════════════════
 
 class _RadarBlip extends StatelessWidget {

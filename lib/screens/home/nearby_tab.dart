@@ -8,10 +8,8 @@ import '../../widgets/nearby_user_card.dart';
 import 'radar_view.dart';
 import 'nearby_list_view.dart';
 
-/// Tab "Nearby" con toggle Radar / Lista.
-///
-/// Ascolta [NearbyDetectionService] come unica sorgente di verità
-/// e passa la lista a entrambe le view.
+/// Tab che mostra chi c'è nelle vicinanze, con vista Radar o Lista.
+/// Prende i dati da NearbyDetectionService e li passa alle due view.
 class NearbyTab extends StatefulWidget {
   final UserModel currentUser;
 
@@ -53,7 +51,7 @@ class _NearbyTabState extends State<NearbyTab> {
 
     return Column(
       children: [
-        // ── Toggle Radar / Lista ──
+        // Selettore tra vista Radar e vista Lista
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Row(
@@ -87,7 +85,7 @@ class _NearbyTabState extends State<NearbyTab> {
                 ),
               ),
               const SizedBox(width: 12),
-              // Contatore persone
+              // Numero di persone rilevate in questo momento
               Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -117,7 +115,7 @@ class _NearbyTabState extends State<NearbyTab> {
         ),
 
         
-        // ── Contenuto ──
+        // Vista principale (radar o lista in base alla selezione)
         Expanded(
           child: _viewMode == _ViewMode.radar
               ? RadarView(
@@ -172,8 +170,9 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-/// Icona con animazione pulse continua (non usa TweenAnimationBuilder
-/// perché richiederebbe un StatefulWidget esterno per il reverse loop).
+/// Icona che pulsa mentre è in corso la scansione BLE.
+/// Usiamo AnimationController manuale invece di TweenAnimationBuilder
+/// perché il reverse loop richiede un widget esterno.
 class _PulseIcon extends StatefulWidget {
   final Color color;
   const _PulseIcon({required this.color});

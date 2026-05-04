@@ -1,13 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
-/// Avatar utente riutilizzabile con fallback a iniziale.
-///
-/// Supporta:
-/// - Immagine da URL con cache (CachedNetworkImage)
-/// - Fallback a iniziale del nome
-/// - Badge overlay opzionale (es. indicatore online)
-/// - Dimensioni configurabili
+/// Widget avatar riutilizzabile: mostra la foto da URL o l'iniziale del nome.
+/// Ha cache automatica, supporta un badge opzionale e dimensioni personalizzabili.
 class UserAvatar extends StatelessWidget {
   final String? imageUrl;
   final String name;

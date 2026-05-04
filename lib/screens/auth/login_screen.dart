@@ -64,10 +64,10 @@ class _LoginScreenState extends State<LoginScreen>
       backgroundColor: const Color(0xFF050D1E),
       body: Stack(
         children: [
-          // Background gradient + glow orbs
+          // Sfondo con sfere di luce
           const _BackgroundGlow(),
 
-          // Main content
+          // Contenuto principale della schermata
           SafeArea(
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 28),
@@ -78,11 +78,11 @@ class _LoginScreenState extends State<LoginScreen>
                   children: [
                     const SizedBox(height: 60),
 
-                    // ── Logo + title ──
+                    // Logo e titolo
                     Center(
                       child: Column(
                         children: [
-                          // Logo con glow pulse
+                          // Logo con animazione di pulsazione
                           AnimatedBuilder(
                             animation: _pulseCtrl,
                             builder: (context, child) {
@@ -122,7 +122,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                           const SizedBox(height: 24),
 
-                          // ProxiMeet wordmark
+                          // Nome dell'app
                           const Text(
                             'ProxiMeet',
                             style: TextStyle(
@@ -148,7 +148,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                     const SizedBox(height: 52),
 
-                    // ── Glass card form ──
+                    // Form di login
                     Container(
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
@@ -188,7 +188,7 @@ class _LoginScreenState extends State<LoginScreen>
                           ),
                           const SizedBox(height: 24),
 
-                          // Email
+                          // Campo email
                           TextFormField(
                             controller: _emailController,
                             keyboardType: TextInputType.emailAddress,
@@ -209,7 +209,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                           const SizedBox(height: 14),
 
-                          // Password
+                          // Campo password
                           TextFormField(
                             controller: _passwordController,
                             obscureText: _obscurePassword,
@@ -240,7 +240,7 @@ class _LoginScreenState extends State<LoginScreen>
                             onFieldSubmitted: (_) => _login(),
                           ),
 
-                          // Errore
+                          // Messaggio di errore
                           if (_errorMessage != null) ...[
                             const SizedBox(height: 14),
                             Container(
@@ -271,7 +271,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                           const SizedBox(height: 24),
 
-                          // Gradient CTA button
+                          // Bottone di accesso
                           _GradientButton(
                             onPressed: _loading ? null : _login,
                             child: _loading
@@ -299,7 +299,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                     const SizedBox(height: 28),
 
-                    // Sign up link
+                    // Link alla schermata di registrazione
                     Center(
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -342,7 +342,7 @@ class _LoginScreenState extends State<LoginScreen>
   }
 }
 
-// ── Background con glow orbs ─────────────────────────────────
+// ── Sfondo con sfere di luce ─────────────────────────────────
 
 class _BackgroundGlow extends StatelessWidget {
   const _BackgroundGlow();
@@ -352,7 +352,7 @@ class _BackgroundGlow extends StatelessWidget {
     return SizedBox.expand(
       child: Stack(
         children: [
-          // Orb top-center (primary blue)
+          // Sfera luminosa in alto al centro
           Positioned(
             top: -80,
             left: 0,
@@ -373,7 +373,7 @@ class _BackgroundGlow extends StatelessWidget {
               ),
             ),
           ),
-          // Orb bottom-right (lighter accent)
+          // Sfera luminosa in basso a destra
           Positioned(
             bottom: 20,
             right: -60,
@@ -397,7 +397,7 @@ class _BackgroundGlow extends StatelessWidget {
   }
 }
 
-// ── Gradient button ──────────────────────────────────────────
+// ── Bottone con sfumatura ────────────────────────────────────
 
 class _GradientButton extends StatelessWidget {
   final VoidCallback? onPressed;

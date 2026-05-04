@@ -9,14 +9,14 @@ class BlePermissionsService {
 
   static final BlePermissionsService shared = BlePermissionsService._();
 
-  // Compatibilità con codice che usa .instance
+  // Alias per chi usa .instance invece di .shared.
   static BlePermissionsService get instance => shared;
 
   Future<bool> isBluetoothOn() async {
     if (kIsWeb) return false;
 
-    // Su iOS non blocchiamo mai l'ingresso evento su questo check.
-    // CoreBluetooth gestisce il permesso Bluetooth dal plugin nativo.
+    // Su iOS non blocchiamo il join su questo check.
+    // Il permesso Bluetooth lo chiede direttamente il plugin Swift quando serve.
     if (Platform.isIOS) return true;
 
     try {
@@ -54,10 +54,8 @@ class BlePermissionsService {
   }
 
   Future<bool> _requestIOS() async {
-    // iOS:
-    // - Non bloccare l'ingresso evento sul permesso Bluetooth.
-    // - Il prompt Bluetooth viene gestito da CoreBluetooth quando parte il plugin Swift.
-    // - Per iBeacon ranging serve Location.
+    // iOS: non blocchiamo sull'autorizzazione BT, la gestisce CoreBluetooth.
+    // Chiediamo solo la Location perché serve per il ranging iBeacon.
     try {
       var locationStatus = await Permission.locationWhenInUse.status;
 
@@ -71,8 +69,8 @@ class BlePermissionsService {
         debugPrint('[BLE-PERM] iOS location status: $locationStatus');
       }
 
-      // Importante: ritorna sempre true su iOS.
-      // L'utente deve poter entrare nell'evento anche se iBeacon non parte.
+      // Torniamo sempre true su iOS: anche senza Location si può entrare
+      // nell'evento perché BLE GATT funziona comunque.
       return true;
     } catch (e) {
       debugPrint('[BLE-PERM] iOS errore richiesta permessi: $e');
@@ -82,9 +80,9 @@ class BlePermissionsService {
 
   Future<bool> _requestAndroid() async {
     try {
-      // BLE scan/advertise cambia tra Android <= 11 e Android 12+.
-      // Chiediamo tutti i permessi utili, ma NON blocchiamo il join solo perché
-      // un permesso Android 12+ risulta “denied” su device Android 11 o inferiori.
+      // Su Android i permessi BLE cambiano tra versione 11 e 12+.
+      // Chiediamo tutto, ma non blocchiamo il join se qualcosa manca:
+      // su Android 11 i permessi BT runtime non esistono.
       final locationStatus = await Permission.locationWhenInUse.request();
       final scanStatus = await Permission.bluetoothScan.request();
       final advertiseStatus = await Permission.bluetoothAdvertise.request();
@@ -92,9 +90,9 @@ class BlePermissionsService {
 
       final locationOk = locationStatus.isGranted;
 
-      // Su Android 12+ questi devono essere granted. Su Android <= 11 alcuni
-      // device/plugin li riportano denied/not applicable: in quel caso il check
-      // reale viene fatto dal plugin nativo, che richiede solo Fine Location.
+      // Su Android 12+ scan/advertise/connect devono essere tutti granted.
+      // Su Android 11 possono risultare denied ma non è un problema:
+      // il plugin nativo fa il check finale e usa solo Fine Location.
       final android12PermsOk =
           scanStatus.isGranted && advertiseStatus.isGranted && connectStatus.isGranted;
 
@@ -118,7 +116,7 @@ class BlePermissionsService {
     if (kIsWeb) return false;
 
     if (Platform.isIOS) {
-      // Non bloccare mai il flusso iOS su questo check.
+      // Su iOS saltiamo il check e lasciamo sempre passare.
       return true;
     }
 
@@ -130,12 +128,11 @@ class BlePermissionsService {
       final advertise = await Permission.bluetoothAdvertise.status;
       final connect = await Permission.bluetoothConnect.status;
 
-      // Android 12+: tutti e tre granted.
+      // Android 12+: se tutti e tre i permessi BT sono ok siamo a posto.
       if (scan.isGranted && advertise.isGranted && connect.isGranted) return true;
 
-      // Android <= 11: Fine Location è sufficiente; i permessi Bluetooth runtime
-      // possono risultare denied/non applicabili. Il plugin Kotlin farà il check
-      // definitivo prima di avviare scan/advertising.
+      // Android 11 e precedenti: basta la Location.
+      // I permessi BT runtime non esistono qui, ci pensa il plugin Kotlin.
       return true;
     }
 

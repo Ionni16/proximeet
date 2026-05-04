@@ -6,7 +6,7 @@ import '../core/logger.dart';
 import '../models/nearby_user.dart';
 import 'ble_scanner_service.dart';
 
-/// Profilo cachato dal proximityTokens.
+/// Profilo utente tenuto in memoria dopo averlo letto da Firestore.
 class _CachedProfile {
   final String uid;
   final String displayName;
@@ -25,16 +25,18 @@ class _CachedProfile {
   });
 }
 
-/// Orchestratore tra BLE scanner e UI.
+/// Collega lo scanner BLE con la UI: sente le detection, risolve il token
+/// per capire chi è il peer, liscia l'RSSI e aggiorna la lista nella UI.
 ///
-/// 1. Ascolta [BleScannerService.detections]
-/// 2. Risolve token temporaneo → uid + profilo pubblico
-/// 3. Smoothing RSSI con EWMA (α=0.25) per stabilizzare il segnale
-/// 4. Filtra duplicati e stale
-/// 5. Scrive detections su Firestore (per gating)
-/// 6. Emette [Stream<List<NearbyUser>>] per la UI
+/// Passi:
+/// 1. Ascolta BleScannerService.detections
+/// 2. Risolve il token → uid + profilo
+/// 3. Liscia l'RSSI con EWMA (α=0.3)
+/// 4. Filtra duplicati e entry troppo vecchie
+/// 5. Scrive la detection su Firestore (usata per il gating contatti)
+/// 6. Emette Stream<List<NearbyUser>> alla UI
 ///
-/// Singleton: usa [NearbyDetectionService.instance].
+/// Singleton: usa NearbyDetectionService.instance.
 class NearbyDetectionService {
   NearbyDetectionService._();
   static final NearbyDetectionService instance = NearbyDetectionService._();
@@ -45,16 +47,15 @@ class NearbyDetectionService {
   final Map<String, NearbyUser> _nearbyMap = {};
   final Map<String, DateTime> _lastDetectionWriteAt = {};
 
-  // ── EWMA RSSI smoothing (dart-side) ─────────────────────────────────────
-  // Seconda barriera dopo lo smoothing nativo (Android/iOS).
-  // Gestisce anche i casi in cui il plugin nativo non abbia già smoothato
-  // (es. vecchie build o test diretti con il canale).
-  // α=0.3: più reattivo lato Dart perché il nativo ha già smorzato.
+  // Lisciatura RSSI lato Dart con media mobile esponenziale (EWMA).
+  // È un secondo filtro: il plugin nativo di solito ha già liscio il valore,
+  // ma questo copre il caso in cui non lo faccia (vecchie build o test).
+  // α=0.3 perché il nativo ha già attenuato i picchi, possiamo essere più reattivi.
   final Map<String, double> _rssiSmoothed = {};
   static const double _ewmaAlpha = 0.3;
 
-  // Emit throttle: non riemettere la lista per lo stesso UID più spesso
-  // di una volta ogni _minEmitIntervalMs. Evita rebuild UI inutili.
+  // Non emettiamo un aggiornamento per lo stesso utente più spesso di 900ms
+  // per non inondare la UI di rebuild continue.
   final Map<String, DateTime> _lastEmitForUid = {};
   static const int _minEmitIntervalMs = 900;
   // ─────────────────────────────────────────────────────────────────────────
@@ -210,9 +211,8 @@ class NearbyDetectionService {
     if (profile.uid.isEmpty) return;
     if (profile.uid == _myUid) return;
 
-    // Emit throttle: se abbiamo già emesso per questo UID recentemente
-    // e il RSSI smoothed non è cambiato significativamente (< 3 dBm),
-    // saltiamo l'emit per non inondare la UI di rebuild.
+    // Se abbiamo già mandato un update per questo utente
+    // e l'RSSI non è cambiato di più di 3 dBm, saltiamo l'emit.
     final now = DateTime.now();
     final lastEmit = _lastEmitForUid[profile.uid];
     final existing = _nearbyMap[profile.uid];
@@ -223,7 +223,7 @@ class NearbyDetectionService {
         : 999999;
 
     if (sinceLastEmitMs < _minEmitIntervalMs && rssiDelta < 3) {
-      // Aggiorna comunque il nearbyMap (per stale tracking), ma non emit.
+      // Aggiorniamo lastSeen per non marcarlo stale, ma non notifichiamo la UI.
       if (existing != null) {
         _nearbyMap[profile.uid] = NearbyUser(
           uid: existing.uid,
@@ -342,8 +342,8 @@ class NearbyDetectionService {
       _nearbyMap.remove(uid);
       _lastDetectionWriteAt.remove(uid);
       _rssiSmoothed.removeWhere((key, _) {
-        // key è sessionBleId, non uid; non possiamo mappare qui facilmente.
-        // Pulizia conservativa: lasciamo; la map è piccola.
+        // La chiave è il sessionBleId, non l'uid: senza cercare nel resolveCache
+        // non riusciamo a fare il mapping. Per ora lasciamo, la map è piccola.
         return false;
       });
       _lastEmitForUid.remove(uid);

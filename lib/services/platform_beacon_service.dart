@@ -8,14 +8,13 @@ import '../core/logger.dart';
 import '../models/nearby_user.dart';
 import 'debug_error_service.dart';
 
-/// Trasporto nativo BLE GATT bidirezionale.
+/// Parla con il codice nativo (Swift/Kotlin) tramite MethodChannel e EventChannel.
 ///
-/// Ogni telefono espone un GATT server con un Service UUID fisso e una
-/// characteristic leggibile contenente un token temporaneo. In parallelo fa
-/// scan dello stesso Service UUID, si connette ai peer e legge il token.
+/// Ogni telefono fa due cose contemporaneamente: espone un server GATT
+/// con il proprio token temporaneo e scansiona i GATT dei peer vicini.
 ///
-/// Nota: il nome del canale resta `proximeet/beacon` per compatibilità con il
-/// codice esistente, ma il path primario non è più iBeacon.
+/// Il canale si chiama ancora "proximeet/beacon" per retrocompatibilità,
+/// ma ora usa BLE GATT, non iBeacon.
 class PlatformBeaconService {
   PlatformBeaconService._() {
     _nativeSub = _events.receiveBroadcastStream().listen(
@@ -197,6 +196,8 @@ class PlatformBeaconService {
   }
 
   Future<void> dispose() async {
+    await _nativeSub?.cancel();
+    _nativeSub = null;
     await _stopNative();
   }
 

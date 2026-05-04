@@ -84,7 +84,7 @@ class WalletContact {
       phone: (map['phone'] ?? '').toString(),
       linkedin: (map['linkedin'] ?? '').toString(),
 
-      // Compatibilità con tutti i nomi campo usati nel progetto / Firestore.
+      // L'URL dell'avatar può avere nomi diversi nei vecchi documenti Firestore, proviamo tutti.
       avatarURL: (map['avatarURL'] ??
               map['avatarUrl'] ??
               map['photoURL'] ??

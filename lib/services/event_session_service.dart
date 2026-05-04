@@ -12,7 +12,7 @@ import 'debug_error_service.dart';
 import 'nearby_detection_service.dart';
 import 'presence_heartbeat_service.dart';
 
-/// Gestisce la sessione evento e il token BLE GATT temporaneo.
+/// Gestisce il join/leave di un evento e il token BLE temporaneo.
 class EventSessionService {
   EventSessionService._();
 
@@ -57,9 +57,9 @@ class EventSessionService {
       PresenceHeartbeatService.instance.start(eventId: eventId, uid: uid);
       _isInEvent = true;
 
-      // Importante per rilevamento rapido: il listener Dart deve essere attivo
-      // prima che il plugin nativo inizi a emettere gattPeer. Altrimenti le prime
-      // detection possono perdersi e l'utente vede il peer solo dopo retry successivi.
+      // NearbyDetectionService deve essere in ascolto prima che parta il plugin nativo,
+      // altrimenti le prime detection vanno perse e i peer vicini
+      // si vedono solo dalla seconda scansione in poi.
       await _startNearbyBestEffort(eventId: eventId, uid: uid, token: token);
       await _startBleGattBestEffort(token);
 

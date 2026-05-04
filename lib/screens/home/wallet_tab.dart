@@ -5,7 +5,7 @@ import '../../models/connection_model.dart';
 import '../../services/firestore_service.dart';
 import '../../widgets/user_avatar.dart';
 
-/// Tab Wallet: lista contatti scambiati con ricerca.
+/// Tab con tutti i biglietti scambiati, ricercabili per nome o azienda.
 class WalletTab extends StatefulWidget {
   const WalletTab({super.key});
 
@@ -29,7 +29,7 @@ class _WalletTabState extends State<WalletTab> {
 
     return Column(
       children: [
-        // Search bar
+        // Barra di ricerca
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: TextField(
@@ -58,7 +58,7 @@ class _WalletTabState extends State<WalletTab> {
           ),
         ),
 
-        // Lista contatti
+        // Lista dei contatti salvati
         Expanded(
           child: StreamBuilder<List<WalletContact>>(
             stream: FirestoreService.instance.listenToWallet(),
@@ -128,7 +128,7 @@ class _WalletTabState extends State<WalletTab> {
   }
 }
 
-// ── Contact Card ────────────────────────────────────────────
+// ── Card del singolo contatto ────────────────────────────────
 
 class _ContactCard extends StatelessWidget {
   final WalletContact contact;
@@ -214,7 +214,7 @@ class _ContactCard extends StatelessWidget {
           padding: const EdgeInsets.all(24),
           child: Column(
             children: [
-              // Handle
+              // Maniglia per trascinare il bottom sheet
               Container(
                 width: 40,
                 height: 4,

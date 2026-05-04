@@ -36,17 +36,17 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * ProxiMeet BLE GATT bidirezionale.
+ * Plugin che fa da ponte tra Flutter e il BLE nativo Android.
  *
- * Ogni telefono è contemporaneamente:
- * - GATT server/peripheral: advertise Service UUID fisso + characteristic token leggibile.
- * - GATT client/central: scan, connectGatt, discoverServices, read characteristic token.
+ * Ogni telefono fa due cose contemporaneamente:
+ * - GATT server: fa advertising del Service UUID e mette il token in una characteristic leggibile.
+ * - GATT client: scansiona, si connette ai peer, legge la loro characteristic e manda il token a Dart.
  *
- * Correzioni importanti rispetto alla prima versione:
- * - Scan Android senza filtro hardware obbligatorio: diversi device rilevano più rapidamente iOS così.
- * - Retry controllato anche sui fallimenti: niente loop connect/discover/close continuo.
+ * Note importanti rispetto alla versione precedente:
+ * - Lo scan Android non usa filtro hardware: molti device rilevano iOS più in fretta senza filtro.
+ * - I retry sulla connessione sono controllati: niente loop infinito di connect/discover/close.
  * - Un solo discoverServices per connessione.
- * - Eventi diagnostici espliciti fino a tokenReadComplete/gattPeer.
+ * - Gli eventi diagnostici coprono tutto il percorso fino a tokenReadComplete/gattPeer.
  */
 class ProxiMeetBeaconPlugin(
     private val activity: Activity,
@@ -180,8 +180,8 @@ class ProxiMeetBeaconPlugin(
         scanner = bluetoothAdapter.bluetoothLeScanner
 
         val serverOk = startGattServer()
-        // Advertising parte dal callback onServiceAdded: così un peer non può connettersi
-        // mentre il GATT service non è ancora visibile.
+        // L'advertising parte solo dopo che il GATT service è pronto (callback onServiceAdded).
+        // Se partisse prima, un peer potrebbe connettersi prima che il service sia visibile.
         val advOk = false
         val scanOk = startScanning()
 
@@ -385,8 +385,8 @@ class ProxiMeetBeaconPlugin(
         }
 
         return try {
-            // No hardware filter: su diversi Android il filtro su UUID 128-bit rallenta o perde advertising iOS.
-            // Filtriamo manualmente sotto con scanRecord.serviceUuids.
+            // Nessun filtro hardware: su molti Android il filtro per UUID 128-bit perde i pacchetti iOS o rallenta.
+            // Il filtraggio lo facciamo a mano controllando scanRecord.serviceUuids.
             bleScanner.startScan(null, settingsBuilder.build(), scanCallback)
             emit(mapOf("type" to "scanStarted", "transport" to "ble_gatt", "platform" to "android", "filter" to "manual_service_uuid"))
             true

@@ -9,9 +9,8 @@ import '../models/connection_model.dart';
 import 'nearby_detection_service.dart';
 import 'event_session_service.dart';
 
-/// Servizio Firestore centralizzato.
-///
-/// Singleton: usa [FirestoreService.instance].
+/// Punto unico di accesso a tutte le query Firestore dell'app.
+/// Singleton: usa sempre FirestoreService.instance.
 class FirestoreService {
   FirestoreService._();
   static final FirestoreService instance = FirestoreService._();
@@ -27,7 +26,7 @@ class FirestoreService {
     final data = doc.data();
     if (data == null) return null;
 
-    // Il doc id è la source of truth: alcuni profili storici non hanno uid.
+    // Usiamo il doc ID come uid perché alcuni profili vecchi non ce l'hanno nel campo.
     return UserModel.fromMap({
       ...data,
       'uid': (data['uid'] ?? uid).toString(),
@@ -58,7 +57,7 @@ class FirestoreService {
     return EventModel.fromMap(doc.id, data);
   }
 
-  /// Conteggio presenti attivi.
+  /// Stream con il numero di utenti attivi in questo momento nell'evento.
   Stream<int> listenToActiveCount(String eventId) {
     return _db
         .collection('events')
@@ -71,8 +70,8 @@ class FirestoreService {
 
   // ── RICHIESTE CONTATTO ──────────────────────────────────
 
-  /// Invia richiesta contatto. Consentita solo se l'utente è nearby
-  /// o è stato rilevato di recente nei dati detection.
+  /// Manda una richiesta di scambio biglietto.
+  /// Funziona solo se il destinatario è stato rilevato nelle vicinanze di recente.
   Future<void> sendConnectionRequest(
     String targetUid, {
     bool fromQr = false,
@@ -96,8 +95,8 @@ class FirestoreService {
       throw Exception('QR di un altro evento');
     }
 
-    // QR = consenso/prossimità esplicita. Non deve dipendere dallo scan BLE,
-    // soprattutto nel caso Android foreground che non vede subito iPhone.
+    // Se la richiesta arriva da QR non serve il check BLE:
+    // l'utente ha mostrato fisicamente il codice, quindi è sicuramente vicino.
     final isNearby = fromQr ||
         NearbyDetectionService.instance.isRecentlyDetected(
           targetUid,
@@ -167,11 +166,9 @@ class FirestoreService {
     });
   }
 
-  /// Rispondi a richiesta.
-  ///
-  /// Il wallet viene scritto solo qui lato client.
-  /// La funzione è resa idempotente: se la richiesta è già stata gestita,
-  /// non la duplichiamo.
+  /// Accetta o rifiuta una richiesta di scambio biglietto.
+  /// Il wallet viene aggiornato qui lato client, non dalla Cloud Function.
+  /// Se la richiesta è già stata gestita non fa niente (idempotente).
   Future<void> respondToRequest(String requestId, bool accepted) async {
     final requestRef = _db.collection('connectionRequests').doc(requestId);
 
