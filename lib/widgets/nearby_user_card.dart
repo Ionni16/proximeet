@@ -4,7 +4,7 @@ import '../models/nearby_user.dart';
 import '../services/firestore_service.dart';
 import 'user_avatar.dart';
 
-/// Bottom sheet premium per un utente rilevato via BLE.
+/// Bottom sheet con il profilo di un utente rilevato via BLE.
 class NearbyUserCard {
   NearbyUserCard._();
 
@@ -44,7 +44,7 @@ class _NearbyUserSheet extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Handle
+              // Maniglia per trascinare il bottom sheet
               Padding(
                 padding: const EdgeInsets.only(top: 12, bottom: 0),
                 child: Container(
@@ -57,17 +57,17 @@ class _NearbyUserSheet extends StatelessWidget {
                 ),
               ),
 
-              // ── Header con gradient ──
+              // Header con avatar e informazioni principali
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
                 child: Column(
                   children: [
-                    // Avatar con glow
+                    // Avatar con alone luminoso attorno
                     Stack(
                       alignment: Alignment.center,
                       children: [
-                        // Glow ring
+                        // Cerchio luminoso che fa da cornice all'avatar
                         Container(
                           width: 100,
                           height: 100,
@@ -134,7 +134,7 @@ class _NearbyUserSheet extends StatelessWidget {
 
                     const SizedBox(height: 14),
 
-                    // Chips distanza/RSSI/tempo
+                    // Distanza, forza segnale e ultimo rilevamento
                     Wrap(
                       spacing: 8,
                       runSpacing: 8,
@@ -155,16 +155,16 @@ class _NearbyUserSheet extends StatelessWidget {
                 ),
               ),
 
-              // Divider
+              // Linea separatrice
               const Divider(height: 1, color: Color(0xFF1A2D47)),
 
-              // ── Body ──
+              // Contenuto principale del bottom sheet
               Padding(
                 padding: const EdgeInsets.all(24),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Bio
+                    // Bio dell'utente
                     if (nearby.bio.isNotEmpty) ...[
                       const _SectionLabel('BIO'),
                       const SizedBox(height: 8),
@@ -188,7 +188,7 @@ class _NearbyUserSheet extends StatelessWidget {
                       const SizedBox(height: 20),
                     ],
 
-                    // Contatti
+                    // Link e contatti dell'utente
                     if (nearby.hasSocials) ...[
                       const _SectionLabel('CONTATTI'),
                       const SizedBox(height: 8),
@@ -213,7 +213,7 @@ class _NearbyUserSheet extends StatelessWidget {
                       const SizedBox(height: 20),
                     ],
 
-                    // CTA
+                    // Bottone per scambiare il biglietto
                     _SendRequestButton(
                       targetUid: nearby.uid,
                       targetName: nearby.firstName,
@@ -231,7 +231,7 @@ class _NearbyUserSheet extends StatelessWidget {
   }
 }
 
-// ── Chip distanza colorata ────────────────────────────────────
+// ── Chip con la distanza colorata in base al segnale ─────────
 
 class _DistanceChip extends StatelessWidget {
   final NearbyUser nearby;
@@ -415,7 +415,7 @@ class _ContactRow extends StatelessWidget {
   }
 }
 
-/// Bottone "Scambia biglietto" con gradient
+/// Bottone per mandare la richiesta di scambio biglietto.
 class _SendRequestButton extends StatefulWidget {
   final String targetUid;
   final String targetName;

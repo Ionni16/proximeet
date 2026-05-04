@@ -38,7 +38,7 @@ class UserModel {
     return parts.join(' ');
   }
 
-  /// Per Firestore — usa Timestamp, non ISO string.
+  /// Converte il modello in mappa per Firestore. Usa Timestamp per le date, non stringhe.
   Map<String, dynamic> toMap() {
     return {
       'uid': uid.trim(),
@@ -75,7 +75,7 @@ class UserModel {
     );
   }
 
-  /// Summary pubblico compatto per bleMapping / nearby.
+  /// Versione compatta del profilo, usata nel token BLE e nella lista nearby.
   Map<String, dynamic> toSummary() {
     return {
       'uid': uid.trim(),
@@ -87,7 +87,7 @@ class UserModel {
     };
   }
 
-  /// Dati contatto completi utili per wallet / connessioni salvate.
+  /// Dati completi del contatto, usati quando si salva nel wallet.
   Map<String, dynamic> toWalletContactData() {
     return {
       'uid': uid.trim(),
@@ -115,14 +115,14 @@ class UserModel {
     return value?.trim() ?? '';
   }
 
-  /// Restituisce null se la stringa è vuota o null.
+  /// Torna null se la stringa è vuota o null, altrimenti la stringa pulita.
   static String? _nonEmpty(dynamic value) {
     if (value == null) return null;
     final s = value.toString().trim();
     return s.isEmpty ? null : s;
   }
 
-  /// Gestisce sia Timestamp Firestore che ISO string.
+  /// Legge una data da Firestore: può essere un Timestamp o una stringa ISO.
   static DateTime _parseDateTime(dynamic value) {
     if (value is Timestamp) return value.toDate();
     if (value is String) return DateTime.tryParse(value) ?? DateTime.now();

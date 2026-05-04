@@ -5,7 +5,7 @@ class BleAdvertiserService {
 
   static final BleAdvertiserService shared = BleAdvertiserService._();
 
-  // Compatibilità con codice che usa .instance
+  // Alias per chi usa .instance invece di .shared.
   static BleAdvertiserService get instance => shared;
 
   bool get isAdvertising => PlatformBeaconService.instance.isRunning;

@@ -6,7 +6,7 @@ class BleScannerService {
 
   static final BleScannerService shared = BleScannerService._();
 
-  // Compatibilità con codice che usa .instance
+  // Alias per chi usa .instance invece di .shared.
   static BleScannerService get instance => shared;
 
   bool _isScanning = false;
@@ -27,17 +27,16 @@ class BleScannerService {
     _isScanning = true;
     _mySessionBleId = mySessionBleId;
 
-    // Lo scan reale è già gestito dal plugin nativo tramite PlatformBeaconService.
-    // Questo wrapper serve per mantenere compatibile NearbyDetectionService.
+    // Lo scan vero lo fa PlatformBeaconService col plugin nativo.
+    // Questo wrapper esiste solo per non cambiare l'interfaccia di NearbyDetectionService.
   }
 
   Future<void> stop() async {
     _isScanning = false;
     _mySessionBleId = null;
 
-    // Non chiamiamo PlatformBeaconService.stop() qui.
-    // Lo stop reale viene fatto da BleAdvertiserService.stop(),
-    // così evitiamo doppio stop e race condition.
+    // Non fermiamo PlatformBeaconService qui: lo fa già BleAdvertiserService.stop().
+    // Chiamarlo due volte causerebbe una race condition.
   }
 
   void dispose() {

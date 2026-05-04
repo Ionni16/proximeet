@@ -23,15 +23,15 @@ import CoreBluetooth
   }
 }
 
-/// ProxiMeet BLE GATT bidirezionale.
+/// Plugin iOS per BLE GATT bidirezionale.
 ///
-/// Foreground/radar mode:
-/// - Peripheral: pubblica un GATT service fisso e una characteristic read-only con token temporaneo.
-/// - Central: scansiona lo stesso service, si connette, legge la characteristic e invia gattPeer a Dart.
+/// Ogni telefono fa due cose contemporaneamente:
+/// - Peripheral: pubblica un GATT service con il token temporaneo in una characteristic leggibile.
+/// - Central: scansiona lo stesso service, si connette ai peer e manda il token a Dart.
 ///
-/// Nota critica: su iOS l'advertising parte SOLO dopo il callback didAdd service.
-/// Se si avvia l'advertising prima, Android può connettersi quando il service GATT non è ancora pronto
-/// e chiudere la connessione senza detection.
+/// Importante: su iOS l'advertising parte SOLO dopo il callback didAdd service.
+/// Se parte prima, Android si può connettere quando il service non è ancora pronto
+/// e chiude la connessione senza rilevare niente.
 final class ProxiMeetBeaconPlugin: NSObject,
                                     FlutterStreamHandler,
                                     CBPeripheralManagerDelegate,
@@ -248,8 +248,9 @@ final class ProxiMeetBeaconPlugin: NSObject,
           peripheralManager.state == .poweredOn,
           let serviceUuid = serviceUuid else { return }
 
-    // Payload minimale: niente LocalName. Con UUID 128-bit + local name si rischia overflow/scan-response
-    // e alcuni Android con scan filter diventano lenti o instabili.
+    // Usiamo solo il Service UUID nel payload, senza LocalName.
+    // Aggiungere il nome con UUID 128-bit rischia overflow nel pacchetto di advertising
+    // e su alcuni Android rende il filtro scan lento o instabile.
     peripheralManager.startAdvertising([
       CBAdvertisementDataServiceUUIDsKey: [serviceUuid]
     ])

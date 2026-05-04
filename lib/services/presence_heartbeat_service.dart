@@ -4,9 +4,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../core/constants.dart';
 import '../core/logger.dart';
 
-/// Aggiorna periodicamente `lastSeen` nella presence.
-///
-/// Singleton: usa [PresenceHeartbeatService.instance].
+/// Manda un segnale "sono ancora qui" ogni 30 secondi su Firestore.
+/// Serve per capire chi è ancora attivo nell'evento.
+/// Singleton: usa PresenceHeartbeatService.instance.
 class PresenceHeartbeatService {
   PresenceHeartbeatService._();
   static final PresenceHeartbeatService instance =

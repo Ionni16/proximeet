@@ -3,10 +3,9 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../services/firestore_service.dart';
 
-/// Schermata scanner QR per scambiare biglietti tramite codice QR.
-///
-/// Scansiona URI nel formato: `proximeet://user/{uid}?event={eventId}`
-/// e invia automaticamente una richiesta di contatto.
+/// Schermata per scansionare i QR di altri utenti.
+/// Legge URI nel formato proximeet://user/{uid}?event={eventId}
+/// e manda automaticamente una richiesta di contatto.
 class QrScannerScreen extends StatefulWidget {
   const QrScannerScreen({super.key});
 
@@ -25,7 +24,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
   @override
   void dispose() {
-    // Pulisci snackbar quando lasci la schermata
+    // Chiude le snackbar aperte quando si esce dalla schermata
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     _scannerCtrl.dispose();
     super.dispose();
@@ -39,10 +38,10 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
     final raw = barcode.rawValue!;
 
-    // Blocca subito ulteriori scan finché non terminiamo o resetiamo
+    // Blocco per evitare che più scan vengano processati in parallelo
     setState(() => _processing = true);
 
-    // Verifica formato
+    // Controlla che il QR sia di ProxiMeet
     if (!raw.startsWith('proximeet://user/')) {
       _showError('QR non valido — non è un codice ProxiMeet');
       return;
@@ -50,8 +49,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
     try {
       final uri = Uri.parse(raw);
-      // proximeet://user/{uid}?event={eventId}
-      // → host = "user", pathSegments = ["{uid}"]
+      // Formato atteso: proximeet://user/{uid}?event={eventId}
+      // L'host è "user" e il primo segmento del path contiene l'uid
       final targetUid = uri.pathSegments.isNotEmpty
           ? uri.pathSegments[0]
           : '';
@@ -63,7 +62,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
       final qrEventId = uri.queryParameters['event'] ?? '';
 
-      // Invia richiesta contatto via QR: il QR sostituisce il gating BLE.
+      // Con il QR saltiamo il controllo BLE: l'utente ha mostrato il codice, è vicino.
       await FirestoreService.instance.sendConnectionRequest(
         targetUid,
         fromQr: true,
@@ -88,7 +87,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
   void _showError(String message) {
     if (!mounted) return;
-    // Rimuovi snackbar precedente per evitare accumulo
+    // Chiudiamo la snackbar precedente prima di mostrarne una nuova
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -97,7 +96,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         duration: const Duration(seconds: 2),
       ),
     );
-    // Aspetta un attimo prima di permettere un nuovo scan
+    // Piccola pausa prima di sbloccare la scansione successiva
     Future.delayed(const Duration(milliseconds: 2500), () {
       if (mounted) setState(() => _processing = false);
     });
@@ -117,7 +116,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         title: const Text('Scansiona QR'),
         centerTitle: true,
         actions: [
-          // Toggle torcia
+          // Accende o spegne la torcia
           IconButton(
             icon: Icon(
               _torchOn ? Icons.flash_on : Icons.flash_off,
@@ -128,7 +127,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
               setState(() => _torchOn = !_torchOn);
             },
           ),
-          // Switch camera
+          // Cambia fotocamera
           IconButton(
             icon: const Icon(Icons.flip_camera_ios, color: Colors.white),
             onPressed: () => _scannerCtrl.switchCamera(),
@@ -137,16 +136,16 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       ),
       body: Stack(
         children: [
-          // ── Camera ──
+          // Vista della fotocamera
           MobileScanner(
             controller: _scannerCtrl,
             onDetect: _onDetect,
           ),
 
-          // ── Overlay con mirino ──
+          // Mirino sovrapposto alla camera
           _ScanOverlay(theme: theme),
 
-          // ── Loading indicator ──
+          // Schermata di attesa mentre si invia la richiesta
           if (_processing)
             Container(
               color: Colors.black54,
@@ -165,7 +164,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
               ),
             ),
 
-          // ── Istruzioni in basso ──
+          // Testo di istruzione in fondo allo schermo
           Positioned(
             bottom: 60,
             left: 0,
@@ -201,7 +200,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   }
 }
 
-/// Overlay con mirino quadrato e angoli arrotondati.
+/// Disegna il mirino sopra la camera con angoli ben visibili.
 class _ScanOverlay extends StatelessWidget {
   final ThemeData theme;
 
@@ -217,7 +216,7 @@ class _ScanOverlay extends StatelessWidget {
 
         return Stack(
           children: [
-            // Oscura tutto tranne il mirino
+            // Scurisce lo schermo lasciando trasparente solo l'area del mirino
             ColorFiltered(
               colorFilter: const ColorFilter.mode(
                 Colors.black54,
@@ -247,7 +246,7 @@ class _ScanOverlay extends StatelessWidget {
               ),
             ),
 
-            // Bordo del mirino con angoli
+            // Bordo sottile attorno al mirino
             Positioned(
               left: left,
               top: top,
@@ -264,7 +263,7 @@ class _ScanOverlay extends StatelessWidget {
               ),
             ),
 
-            // Angoli luminosi
+            // Angoli bianchi marcati del mirino
             ..._buildCorners(left, top, scanAreaSize),
           ],
         );
@@ -279,7 +278,7 @@ class _ScanOverlay extends StatelessWidget {
     const radius = Radius.circular(8);
 
     return [
-      // Top-left
+      // Angolo in alto a sinistra
       Positioned(
         left: left - 1,
         top: top - 1,
@@ -304,7 +303,7 @@ class _ScanOverlay extends StatelessWidget {
           ),
         ),
       ),
-      // Top-right
+      // Angolo in alto a destra
       Positioned(
         left: left + size - len + 1,
         top: top - 1,
@@ -329,7 +328,7 @@ class _ScanOverlay extends StatelessWidget {
           ),
         ),
       ),
-      // Bottom-left
+      // Angolo in basso a sinistra
       Positioned(
         left: left - 1,
         top: top + size - thick + 1,
@@ -354,7 +353,7 @@ class _ScanOverlay extends StatelessWidget {
           ),
         ),
       ),
-      // Bottom-right
+      // Angolo in basso a destra
       Positioned(
         left: left + size - len + 1,
         top: top + size - thick + 1,

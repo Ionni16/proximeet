@@ -5,9 +5,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import '../core/logger.dart';
 import '../models/user_model.dart';
 
-/// Servizio autenticazione e gestione profilo utente.
-///
-/// Singleton: usa [AuthService.instance].
+/// Gestisce login, registrazione e aggiornamento profilo.
+/// Singleton: usa sempre AuthService.instance.
 class AuthService {
   AuthService._();
   static final AuthService instance = AuthService._();
@@ -120,24 +119,20 @@ class AuthService {
     return UserModel.fromMap(data);
   }
 
-  /// Aggiorna la foto profilo dell'utente.
-  ///
-  /// BUG FIX: oltre ad aggiornare [users/{uid}], propaga la nuova URL anche
-  /// in tutti i documenti [connections/{contactUid}/contacts/{uid}] dei propri
-  /// contatti. Senza questo passaggio, il wallet degli altri utenti mostrava
-  /// la vecchia foto perché il documento contatto non triggherava un aggiornamento
-  /// dello stream, impedendo all'hydration di rileggere il profilo aggiornato.
+  /// Cambia la foto profilo e la propaga nel wallet di tutti i contatti.
+  /// Se aggiornassimo solo users/{uid}, il wallet degli altri resterebbe
+  /// con la vecchia foto perché il documento contatto non cambia
+  /// e lo stream non si risveglia.
   Future<void> updateAvatar(String uid, String avatarURL) async {
     final normalizedUrl = avatarURL.trim();
 
-    // 1. Aggiorna il profilo principale.
+    // 1. Aggiorna il documento principale su Firestore.
     await _db.collection('users').doc(uid).set({
       'avatarURL': normalizedUrl,
     }, SetOptions(merge: true));
 
-    // 2. Propaga la nuova foto in tutti i wallet dove appaio come contatto.
-    //    Leggo i miei contatti → per ognuno aggiorno la mia entry nel loro wallet.
-    //    Questo triggera i loro stream Firestore → rebuilda il loro wallet.
+    // 2. Per ogni contatto, aggiorna la mia entry nel loro wallet
+    //    così vedono subito la nuova foto senza riaprire l'app.
     try {
       final myContactsSnap = await _db
           .collection('connections')
@@ -175,7 +170,7 @@ class AuthService {
         'Avatar propagato a ${myContactsSnap.docs.length} contatti',
       );
     } catch (e) {
-      // Non bloccante: il profilo principale è già aggiornato.
+      // Se questa parte fallisce non è grave, il profilo principale è già salvato.
       Log.e('AUTH', 'Errore propagazione avatar ai contatti', e);
     }
   }

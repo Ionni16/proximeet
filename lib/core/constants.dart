@@ -2,7 +2,7 @@ abstract final class AppConstants {
   static const String proximeetBeaconUuid =
       'F2703C30-FA18-4173-8599-016070383C81';
 
-  /// BLE GATT primario: Service UUID fisso + characteristic token temporaneo.
+  /// UUID del servizio GATT e della characteristic che contiene il token temporaneo.
   static const String proximeetGattServiceUuid =
       'F2703C30-FA18-4173-8599-016070383C81';
   static const String proximeetGattTokenCharacteristicUuid =

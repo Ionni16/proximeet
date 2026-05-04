@@ -121,8 +121,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }) {
     return TextFormField(
       controller: controller,
-      // KEY FIX: multiline fields must use TextInputType.multiline
-      // to avoid Flutter assertion with TextInputAction.newline
+      // I campi multiriga devono usare TextInputType.multiline,
+      // altrimenti Flutter crasha con TextInputAction.newline.
       keyboardType: maxLines > 1 ? TextInputType.multiline : keyboardType,
       obscureText: obscure,
       maxLines: maxLines,
@@ -150,7 +150,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  // ── Step 0: Profilo ─────────────────────────────────────────────────────────
+  // ── Step 0: Dati profilo ────────────────────────────────────────────────────
   Widget _buildProfiloStep() {
     return Column(
       children: [
@@ -233,7 +233,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  // ── Step 1: Account ─────────────────────────────────────────────────────────
+  // ── Step 1: Credenziali account ─────────────────────────────────────────────
   Widget _buildAccountStep() {
     return Column(
       children: [
@@ -313,17 +313,17 @@ class _RegisterScreenState extends State<RegisterScreen> {
         key: _formKey,
         child: Column(
           children: [
-            // ── Step indicator ──
+            // Indicatore dei passi
             _StepIndicator(currentStep: _currentStep),
 
-            // ── Content ──
+            // Contenuto dello step corrente
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Step title
+                    // Titolo e descrizione dello step
                     _StepHeader(
                       step: _currentStep,
                       titles: const ['Profilo professionale', 'Credenziali account'],
@@ -335,7 +335,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
                     const SizedBox(height: 24),
 
-                    // Form fields in glass card
+                    // Campi del form
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
@@ -355,7 +355,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                           : _buildAccountStep(),
                     ),
 
-                    // Error message
+                    // Messaggio di errore
                     if (_errorMessage != null) ...[
                       const SizedBox(height: 16),
                       Container(
@@ -388,7 +388,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
                     const SizedBox(height: 28),
 
-                    // ── Buttons ──
+                    // Bottoni avanti/indietro
                     Row(
                       children: [
                         if (_currentStep > 0) ...[
@@ -434,7 +434,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 }
 
-// ── Componenti UI ────────────────────────────────────────────────────────────
+// ── Componenti UI della schermata di registrazione ───────────────────────────
 
 class _StepIndicator extends StatelessWidget {
   final int currentStep;

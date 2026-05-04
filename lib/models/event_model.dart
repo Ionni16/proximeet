@@ -42,14 +42,14 @@ class EventModel {
     };
   }
 
-  /// Formato data leggibile.
+  /// Data e ora dell'evento in formato leggibile (es. "12 gen, 15:00").
   String get dateRange {
     final start = '${startDate.day}/${startDate.month}';
     final end = '${endDate.day}/${endDate.month}';
     return '$start – $end';
   }
 
-  /// True se l'evento è in corso adesso.
+  /// True se l'evento è già iniziato e non è ancora finito.
   bool get isOngoing {
     final now = DateTime.now();
     return now.isAfter(startDate) && now.isBefore(endDate);

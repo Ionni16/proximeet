@@ -175,7 +175,7 @@ class _EventListScreenState extends State<EventListScreen> {
       backgroundColor: const Color(0xFF050D1E),
       body: Stack(
         children: [
-          // Background glow subtile
+          // Sfondo con luce diffusa
           Positioned(
             top: -100,
             left: -60,
@@ -205,12 +205,12 @@ class _EventListScreenState extends State<EventListScreen> {
                 : Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // ── Header ──
+                      // Header
                       Padding(
                         padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
                         child: Row(
                           children: [
-                            // Logo
+                            // Logo dell'app
                             Container(
                               width: 38,
                               height: 38,
@@ -245,7 +245,7 @@ class _EventListScreenState extends State<EventListScreen> {
                               ),
                             ),
                             const Spacer(),
-                            // Logout
+                            // Bottone logout
                             IconButton(
                               icon: const Icon(Icons.logout_outlined,
                                   color: Color(0xFF4A6080), size: 20),
@@ -287,7 +287,7 @@ class _EventListScreenState extends State<EventListScreen> {
 
                       const SizedBox(height: 24),
 
-                      // Label sezione
+                      // Titolo della sezione
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 24),
                         child: Row(
@@ -314,7 +314,7 @@ class _EventListScreenState extends State<EventListScreen> {
 
                       const SizedBox(height: 14),
 
-                      // Lista eventi
+                      // Lista degli eventi disponibili
                       Expanded(
                         child: StreamBuilder<List<EventModel>>(
                           stream:
@@ -398,7 +398,7 @@ class _EventListScreenState extends State<EventListScreen> {
   }
 }
 
-// ── Event Card premium ───────────────────────────────────────
+// ── Card evento ──────────────────────────────────────────────
 
 class _EventCard extends StatelessWidget {
   final EventModel event;
@@ -434,7 +434,7 @@ class _EventCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header gradient strip
+            // Fascia colorata in cima alla card
             Container(
               height: 4,
               decoration: const BoxDecoration(
@@ -452,7 +452,7 @@ class _EventCard extends StatelessWidget {
                   Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Icona evento
+                      // Icona rappresentativa dell'evento
                       Container(
                         width: 48,
                         height: 48,
@@ -530,7 +530,7 @@ class _EventCard extends StatelessWidget {
 
                   const SizedBox(height: 16),
 
-                  // Footer: partecipanti + CTA
+                  // In fondo: numero partecipanti e bottone per entrare
                   Row(
                     children: [
                       StreamBuilder<int>(
@@ -580,7 +580,7 @@ class _EventCard extends StatelessWidget {
                       ),
                       const Spacer(),
 
-                      // Gradient join button
+                      // Bottone per entrare nell'evento
                       _JoinButton(
                         onPressed: isJoining ? null : onJoin,
                         isJoining: isJoining,

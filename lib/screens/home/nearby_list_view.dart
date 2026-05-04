@@ -3,10 +3,8 @@ import 'package:flutter/material.dart';
 import '../../models/nearby_user.dart';
 import '../../widgets/user_avatar.dart';
 
-/// Vista lista delle persone rilevate via BLE.
-///
-/// Ogni card mostra: avatar, nome, ruolo·azienda, distanza,
-/// RSSI, bio preview, e ultimo rilevamento.
+/// Lista delle persone rilevate via BLE.
+/// Ogni card mostra avatar, nome, ruolo, distanza stimata, RSSI e bio.
 class NearbyListView extends StatelessWidget {
   final List<NearbyUser> nearbyUsers;
   final ValueChanged<NearbyUser> onUserTap;
@@ -52,7 +50,7 @@ class _NearbyListCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            // Avatar con indicatore distanza
+            // Avatar con pallino colorato che indica la distanza
             Stack(
               children: [
                 UserAvatar(
@@ -87,12 +85,12 @@ class _NearbyListCard extends StatelessWidget {
             ),
             const SizedBox(width: 14),
 
-            // Info
+            // Dati testuali dell'utente
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Nome
+                  // Nome completo
                   Text(
                     nearby.displayName,
                     style: const TextStyle(
@@ -102,7 +100,7 @@ class _NearbyListCard extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
 
-                  // Ruolo · Azienda
+                  // Ruolo e azienda
                   Text(
                     '${nearby.role} · ${nearby.company}',
                     style: TextStyle(
@@ -113,7 +111,7 @@ class _NearbyListCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                   ),
 
-                  // Bio preview
+                  // Prima riga della bio
                   if (nearby.bio.isNotEmpty) ...[
                     const SizedBox(height: 4),
                     Text(
@@ -130,7 +128,7 @@ class _NearbyListCard extends StatelessWidget {
 
                   const SizedBox(height: 6),
 
-                  // Chips: distanza + tempo
+                  // Etichette con distanza e RSSI
                   Row(
                     children: [
                       _MiniChip(

@@ -6,9 +6,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../core/logger.dart';
 
-/// Servizio per upload foto e gestione storage Firebase.
-///
-/// Singleton: usa [StorageService.instance].
+/// Gestisce la scelta e l'upload della foto profilo su Firebase Storage.
+/// Singleton: usa StorageService.instance.
 class StorageService {
   StorageService._();
   static final StorageService instance = StorageService._();

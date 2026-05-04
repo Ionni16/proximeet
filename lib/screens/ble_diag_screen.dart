@@ -2,18 +2,18 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
-/// Schermata di diagnostica BLE — bypassa completamente la logica di ProxiMeet.
+/// Schermata di debug per testare il BLE direttamente, senza la logica di ProxiMeet.
 ///
-/// Uso:
-///   In main.dart, sostituisci temporaneamente l'home con:
+/// Come si usa:
+///   In main.dart cambia temporaneamente l'home con:
 ///     home: const BleDiagScreen(),
-///   Lancia su iPhone, lascia girare 20 secondi, leggi i numeri a video.
+///   Poi lancia su iPhone, aspetta 20 secondi e guarda i numeri a schermo.
 ///
-/// Cosa risponde:
-///   - Adapter state on/off/unauthorized → problema BT/permission
-///   - Total callbacks ricevuti → scanner riceve davvero qualcosa?
-///   - Device elencati → quale device vede effettivamente l'iPhone
-///   - Errori startScan → eccezioni nascoste
+/// Cosa mostra:
+///   - Adapter state: on/off/unauthorized → problema BT o permessi
+///   - Total callbacks: lo scanner sta ricevendo qualcosa?
+///   - Device elencati: cosa vede il telefono in questo momento
+///   - Errori startScan: eccezioni che normalmente non vedresti
 class BleDiagScreen extends StatefulWidget {
   const BleDiagScreen({super.key});
 
@@ -51,7 +51,7 @@ class _BleDiagScreenState extends State<BleDiagScreen> {
       if (mounted) setState(() {});
     });
 
-    // Aspetta un attimo che l'adapterState venga risolto
+    // Piccola pausa per dare il tempo all'adapterState di aggiornarsi
     await Future.delayed(const Duration(milliseconds: 200));
 
     try {

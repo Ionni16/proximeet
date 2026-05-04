@@ -115,7 +115,7 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // Back button
+                // Bottone indietro
                 IconButton(
                   icon: const Icon(Icons.arrow_back_ios_new,
                       size: 18, color: Color(0xFF8BA3C7)),
@@ -123,7 +123,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   onPressed: _isLeaving ? null : _leaveEvent,
                 ),
 
-                // Logo + info evento
+                // Logo e nome dell'evento corrente
                 const SizedBox(
                   width: 28,
                   height: 28,
@@ -185,7 +185,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
 
-                // Notifiche
+                // Icona notifiche
                 StreamBuilder<List<ConnectionRequest>>(
                   stream: FirestoreService.instance.listenToIncomingRequests(),
                   builder: (context, snapshot) {
@@ -297,7 +297,7 @@ class _NavItem extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Pill indicator
+              // Indicatore del tab corrente
               AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
                 width: selected ? 48 : 0,
