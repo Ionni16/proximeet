@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 import 'firebase_options.dart';
 import 'screens/auth/login_screen.dart';
+import 'screens/splash_screen.dart';
 import 'screens/events/event_list_screen.dart';
 import 'services/event_session_service.dart';
 
@@ -59,16 +60,7 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
       theme: _buildLightTheme(),
       darkTheme: _buildDarkTheme(),
       themeMode: ThemeMode.dark,
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const _SplashLoader();
-          }
-          if (snapshot.hasData) return const EventListScreen();
-          return const LoginScreen();
-        },
-      ),
+      home: const _AppEntry(),
     );
   }
 
@@ -259,6 +251,55 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
         brightness: Brightness.light,
       ),
       useMaterial3: true,
+    );
+  }
+}
+
+
+
+/// Entry point che mostra la splash animata solo al primo avvio,
+/// poi usa lo StreamBuilder per navigare in base allo stato auth.
+class _AppEntry extends StatefulWidget {
+  const _AppEntry();
+  @override
+  State<_AppEntry> createState() => _AppEntryState();
+}
+
+class _AppEntryState extends State<_AppEntry> {
+  bool _splashDone = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_splashDone) {
+      return StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return SplashScreen(
+              destination: const LoginScreen(),
+              onComplete: () => setState(() => _splashDone = true),
+            );
+          }
+          final dest = snapshot.hasData
+              ? const EventListScreen()
+              : const LoginScreen();
+          return SplashScreen(
+            destination: dest,
+            onComplete: () => setState(() => _splashDone = true),
+          );
+        },
+      );
+    }
+
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const _SplashLoader();
+        }
+        if (snapshot.hasData) return const EventListScreen();
+        return const LoginScreen();
+      },
     );
   }
 }
