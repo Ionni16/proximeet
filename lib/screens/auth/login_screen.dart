@@ -1,7 +1,11 @@
 import 'dart:math' show sin, pi;
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
+import '../../core/logger.dart';
 import 'register_screen.dart';
+import 'linkedin_webview_screen.dart';
+import 'linkedin_complete_profile_screen.dart';
+import '../events/event_list_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -20,6 +24,7 @@ class _LoginScreenState extends State<LoginScreen>
   late final AnimationController _pulseCtrl;
 
   bool _loading = false;
+  bool _linkedInLoading = false;
   bool _obscurePassword = true;
   String? _errorMessage;
 
@@ -58,6 +63,92 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
+  // ── LinkedIn OAuth ───────────────────────────────────────────────────────────
+
+  Future<void> _loginWithLinkedIn() async {
+    setState(() {
+      _linkedInLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      // 1. Apri il WebView LinkedIn e ottieni il codice OAuth
+      final result = await Navigator.of(context).push<LinkedInAuthCode>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => const LinkedInWebViewScreen(),
+        ),
+      );
+
+      // Utente ha chiuso il webview senza autorizzare
+      if (result == null || !mounted) {
+        setState(() => _linkedInLoading = false);
+        return;
+      }
+
+      // 2. Scambia il codice con Firebase (via Cloud Function)
+      final signInResult = await _authService.signInWithLinkedIn(result.code);
+
+      if (!mounted) return;
+
+      // 3. Nuovo utente → completamento profilo
+      if (signInResult.isNewUser) {
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => LinkedInCompleteProfileScreen(
+              linkedInProfile: signInResult.linkedInProfile,
+            ),
+          ),
+        );
+        return;
+      }
+
+      // 4. Utente esistente → verifica che il profilo Firestore sia completo.
+      // Può accadere che isNewUser=false ma il documento sia corrotto/incompleto
+      // (es. tentativi precedenti falliti a metà). In quel caso forziamo
+      // il completamento del profilo invece di mandare l'utente all'app.
+      if (!mounted) return;
+      final uid = _authService.currentUser?.uid;
+      if (uid != null) {
+        final existingProfile = await _authService.getUserProfile(uid);
+        final needsCompletion = existingProfile == null ||
+            existingProfile.uid.isEmpty ||
+            existingProfile.company.isEmpty ||
+            existingProfile.role.isEmpty;
+
+        if (!mounted) return;
+
+        if (needsCompletion) {
+          // Profilo mancante o incompleto → completamento profilo
+          Log.d('LOGIN', 'Profilo LinkedIn incompleto, redirect a completamento');
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => LinkedInCompleteProfileScreen(
+                linkedInProfile: signInResult.linkedInProfile,
+              ),
+            ),
+          );
+        } else {
+          // Profilo completo → EventListScreen
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const EventListScreen()),
+            (route) => false,
+          );
+        }
+      }
+    } catch (e) {
+      Log.e('LOGIN', 'Errore LinkedIn login', e);
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Errore accesso con LinkedIn. Riprova.';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _linkedInLoading = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -82,11 +173,11 @@ class _LoginScreenState extends State<LoginScreen>
                     Center(
                       child: Column(
                         children: [
-                          // Logo con animazione di pulsazione
                           AnimatedBuilder(
                             animation: _pulseCtrl,
                             builder: (context, child) {
-                              final glow = 0.5 + 0.5 * sin(_pulseCtrl.value * 2 * pi);
+                              final glow =
+                                  0.5 + 0.5 * sin(_pulseCtrl.value * 2 * pi);
                               return Container(
                                 width: 88,
                                 height: 88,
@@ -94,17 +185,20 @@ class _LoginScreenState extends State<LoginScreen>
                                   shape: BoxShape.circle,
                                   color: const Color(0xFF0D1B30),
                                   border: Border.all(
-                                    color: const Color(0xFF4D8EF7).withOpacity(0.3 + 0.3 * glow),
+                                    color: const Color(0xFF4D8EF7)
+                                        .withOpacity(0.3 + 0.3 * glow),
                                     width: 1.5,
                                   ),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: const Color(0xFF1A56DB).withOpacity(0.3 + 0.2 * glow),
+                                      color: const Color(0xFF1A56DB)
+                                          .withOpacity(0.3 + 0.2 * glow),
                                       blurRadius: 32 + 12 * glow,
                                       spreadRadius: 2,
                                     ),
                                     BoxShadow(
-                                      color: const Color(0xFF4D8EF7).withOpacity(0.12 + 0.08 * glow),
+                                      color: const Color(0xFF4D8EF7)
+                                          .withOpacity(0.12 + 0.08 * glow),
                                       blurRadius: 60,
                                       spreadRadius: 8,
                                     ),
@@ -122,7 +216,6 @@ class _LoginScreenState extends State<LoginScreen>
 
                           const SizedBox(height: 24),
 
-                          // Nome dell'app
                           const Text(
                             'ProxiMeet',
                             style: TextStyle(
@@ -146,9 +239,42 @@ class _LoginScreenState extends State<LoginScreen>
                       ),
                     ),
 
-                    const SizedBox(height: 52),
+                    const SizedBox(height: 40),
 
-                    // Form di login
+                    // ── BOTTONE LINKEDIN ────────────────────────────────────
+                    _LinkedInButton(
+                      loading: _linkedInLoading,
+                      onPressed:
+                          (_loading || _linkedInLoading) ? null : _loginWithLinkedIn,
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Divisore
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Divider(color: Color(0xFF1A2D47), thickness: 1),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Text(
+                            'oppure',
+                            style: TextStyle(
+                              color: const Color(0xFF8BA3C7).withOpacity(0.7),
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        const Expanded(
+                          child: Divider(color: Color(0xFF1A2D47), thickness: 1),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Form di login email/password
                     Container(
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
@@ -198,10 +324,13 @@ class _LoginScreenState extends State<LoginScreen>
                             ),
                             decoration: const InputDecoration(
                               labelText: 'Email',
-                              prefixIcon: Icon(Icons.alternate_email, size: 20),
+                              prefixIcon:
+                                  Icon(Icons.alternate_email, size: 20),
                             ),
                             validator: (v) {
-                              if (v == null || v.isEmpty) return 'Inserisci la tua email';
+                              if (v == null || v.isEmpty) {
+                                return 'Inserisci la tua email';
+                              }
                               if (!v.contains('@')) return 'Email non valida';
                               return null;
                             },
@@ -219,7 +348,8 @@ class _LoginScreenState extends State<LoginScreen>
                             ),
                             decoration: InputDecoration(
                               labelText: 'Password',
-                              prefixIcon: const Icon(Icons.lock_outlined, size: 20),
+                              prefixIcon:
+                                  const Icon(Icons.lock_outlined, size: 20),
                               suffixIcon: IconButton(
                                 icon: Icon(
                                   _obscurePassword
@@ -233,7 +363,9 @@ class _LoginScreenState extends State<LoginScreen>
                               ),
                             ),
                             validator: (v) {
-                              if (v == null || v.isEmpty) return 'Inserisci la password';
+                              if (v == null || v.isEmpty) {
+                                return 'Inserisci la password';
+                              }
                               if (v.length < 6) return 'Minimo 6 caratteri';
                               return null;
                             },
@@ -249,7 +381,8 @@ class _LoginScreenState extends State<LoginScreen>
                                 color: const Color(0xFF4A1010),
                                 borderRadius: BorderRadius.circular(10),
                                 border: Border.all(
-                                  color: const Color(0xFFEF5350).withOpacity(0.3),
+                                  color:
+                                      const Color(0xFFEF5350).withOpacity(0.3),
                                 ),
                               ),
                               child: Row(
@@ -257,11 +390,13 @@ class _LoginScreenState extends State<LoginScreen>
                                   const Icon(Icons.error_outline,
                                       color: Color(0xFFEF5350), size: 16),
                                   const SizedBox(width: 8),
-                                  Text(
-                                    _errorMessage!,
-                                    style: const TextStyle(
-                                      color: Color(0xFFEF9A9A),
-                                      fontSize: 13,
+                                  Expanded(
+                                    child: Text(
+                                      _errorMessage!,
+                                      style: const TextStyle(
+                                        color: Color(0xFFEF9A9A),
+                                        fontSize: 13,
+                                      ),
                                     ),
                                   ),
                                 ],
@@ -273,7 +408,8 @@ class _LoginScreenState extends State<LoginScreen>
 
                           // Bottone di accesso
                           _GradientButton(
-                            onPressed: _loading ? null : _login,
+                            onPressed:
+                                (_loading || _linkedInLoading) ? null : _login,
                             child: _loading
                                 ? const SizedBox(
                                     width: 20,
@@ -299,7 +435,7 @@ class _LoginScreenState extends State<LoginScreen>
 
                     const SizedBox(height: 28),
 
-                    // Link alla schermata di registrazione
+                    // Link alla registrazione
                     Center(
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -342,6 +478,93 @@ class _LoginScreenState extends State<LoginScreen>
   }
 }
 
+// ── Bottone LinkedIn ──────────────────────────────────────────────────────────
+
+class _LinkedInButton extends StatelessWidget {
+  final VoidCallback? onPressed;
+  final bool loading;
+
+  const _LinkedInButton({required this.onPressed, required this.loading});
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = onPressed == null;
+    return SizedBox(
+      width: double.infinity,
+      height: 54,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: disabled
+              ? const Color(0xFF0A66C2).withOpacity(0.3)
+              : const Color(0xFF0A66C2),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: disabled
+              ? []
+              : [
+                  BoxShadow(
+                    color: const Color(0xFF0A66C2).withOpacity(0.35),
+                    blurRadius: 20,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+        ),
+        child: Material(
+          color: Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+          child: InkWell(
+            onTap: onPressed,
+            borderRadius: BorderRadius.circular(16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                // Icona LinkedIn
+                Container(
+                  width: 26,
+                  height: 26,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: const Center(
+                    child: Text(
+                      'in',
+                      style: TextStyle(
+                        color: Color(0xFF0A66C2),
+                        fontWeight: FontWeight.w900,
+                        fontSize: 13,
+                        letterSpacing: -0.5,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                if (loading)
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                else
+                  const Text(
+                    'Continua con LinkedIn',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── Sfondo con sfere di luce ─────────────────────────────────
 
 class _BackgroundGlow extends StatelessWidget {
@@ -352,7 +575,6 @@ class _BackgroundGlow extends StatelessWidget {
     return SizedBox.expand(
       child: Stack(
         children: [
-          // Sfera luminosa in alto al centro
           Positioned(
             top: -80,
             left: 0,
@@ -373,7 +595,6 @@ class _BackgroundGlow extends StatelessWidget {
               ),
             ),
           ),
-          // Sfera luminosa in basso a destra
           Positioned(
             bottom: 20,
             right: -60,

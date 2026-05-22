@@ -18,6 +18,7 @@ dependencies:
   cloud_firestore: ^5.6.6
   firebase_storage: ^12.4.5
   firebase_messaging: ^15.2.5
+  cloud_functions: ^5.2.1      # ← NUOVO: per chiamare linkedinAuth
 
   # Permessi
   permission_handler: ^11.3.1
@@ -31,9 +32,12 @@ dependencies:
   mobile_scanner: ^7.0.0
   qr_flutter: ^4.1.0
 
-  # Immagini (CachedNetworkImage usato in UserAvatar)
+  # Immagini
   cached_network_image: ^3.4.1
   image_picker: ^1.1.2
+
+  # OAuth WebView (per LinkedIn login)
+  webview_flutter: ^4.10.0    # ← NUOVO: webview per OAuth LinkedIn
 
   # Utility
   intl: ^0.20.2

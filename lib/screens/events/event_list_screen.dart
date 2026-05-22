@@ -41,6 +41,19 @@ class _EventListScreenState extends State<EventListScreen> {
   Future<void> _joinEvent(EventModel event) async {
     if (_currentUser == null || _joining) return;
 
+    // Sicurezza: uid vuoto causerebbe crash Firestore con path non valido
+    if (_currentUser!.uid.isEmpty) {
+      final error = AppDebugError(
+        title: 'Profilo incompleto',
+        area: 'SESSION_JOIN',
+        code: 'APP_EMPTY_UID',
+        message: 'Il profilo utente non ha un UID valido. Effettua il logout e accedi di nuovo.',
+        suggestion: 'Logout → Login → completa il profilo.',
+      );
+      if (mounted) await showDebugErrorSheet(context, error);
+      return;
+    }
+
     DebugErrorService.instance.clear();
     setState(() => _joining = true);
 

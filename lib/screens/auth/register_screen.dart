@@ -1,5 +1,17 @@
+// lib/screens/auth/register_screen.dart
+//
+// Registrazione in 2 step:
+//   Step 0 – Profilo professionale (foto OBBLIGATORIA, nome, cognome, azienda, ruolo, …)
+//   Step 1 – Credenziali account (email, password)
+//
+// La foto viene caricata su Firebase Storage DOPO la creazione dell'account,
+// usando l'UID appena generato, e poi aggiornata nel documento Firestore.
+
+import 'dart:io';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
+import '../../services/storage_service.dart';
 import '../events/event_list_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
@@ -12,16 +24,20 @@ class RegisterScreen extends StatefulWidget {
 class _RegisterScreenState extends State<RegisterScreen> {
   final _formKey = GlobalKey<FormState>();
 
-  final _firstNameCtrl      = TextEditingController();
-  final _lastNameCtrl       = TextEditingController();
-  final _emailCtrl          = TextEditingController();
-  final _passwordCtrl       = TextEditingController();
-  final _confirmPasswordCtrl= TextEditingController();
-  final _companyCtrl        = TextEditingController();
-  final _roleCtrl           = TextEditingController();
-  final _phoneCtrl          = TextEditingController();
-  final _linkedinCtrl       = TextEditingController();
-  final _bioCtrl            = TextEditingController();
+  final _firstNameCtrl       = TextEditingController();
+  final _lastNameCtrl        = TextEditingController();
+  final _emailCtrl           = TextEditingController();
+  final _passwordCtrl        = TextEditingController();
+  final _confirmPasswordCtrl = TextEditingController();
+  final _companyCtrl         = TextEditingController();
+  final _roleCtrl            = TextEditingController();
+  final _phoneCtrl           = TextEditingController();
+  final _linkedinCtrl        = TextEditingController();
+  final _bioCtrl             = TextEditingController();
+
+  // ── Foto profilo ─────────────────────────────────────────────────────────────
+  File? _pickedImage;
+  bool _photoError = false; // mostra bordo rosso se si tenta di avanzare senza foto
 
   bool _loading         = false;
   bool _obscurePassword = true;
@@ -44,8 +60,30 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
+  // ── Selezione foto ───────────────────────────────────────────────────────────
+
+  Future<void> _pickPhoto() async {
+    final file = await StorageService.instance.pickImage();
+    if (file == null) return;
+    setState(() {
+      _pickedImage = file;
+      _photoError = false;
+    });
+  }
+
+  // ── Navigazione step ─────────────────────────────────────────────────────────
+
   void _nextStep() {
     if (_currentStep == 0) {
+      // Controlla foto
+      if (_pickedImage == null) {
+        setState(() {
+          _photoError = true;
+          _errorMessage = 'La foto profilo è obbligatoria';
+        });
+        return;
+      }
+      // Controlla campi testo obbligatori
       final ok = _firstNameCtrl.text.trim().isNotEmpty &&
           _lastNameCtrl.text.trim().isNotEmpty &&
           _companyCtrl.text.trim().isNotEmpty &&
@@ -57,12 +95,24 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
     setState(() {
       _errorMessage = null;
+      _photoError = false;
       _currentStep++;
     });
   }
 
+  // ── Registrazione ────────────────────────────────────────────────────────────
+
   Future<void> _register() async {
     if (!_formKey.currentState!.validate()) return;
+
+    // Sicurezza extra: la foto è sempre obbligatoria
+    if (_pickedImage == null) {
+      setState(() {
+        _errorMessage = 'La foto profilo è obbligatoria';
+        _currentStep = 0;
+      });
+      return;
+    }
 
     setState(() {
       _loading = true;
@@ -70,9 +120,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
     });
 
     try {
+      // 1. Crea l'account Firebase Auth + documento Firestore (avatarURL vuoto per ora)
       await AuthService.instance.register(
-        email:     _emailCtrl.text.trim().toLowerCase(),
-        password:  _passwordCtrl.text,
+        email:    _emailCtrl.text.trim().toLowerCase(),
+        password: _passwordCtrl.text,
         firstName: _firstNameCtrl.text.trim(),
         lastName:  _lastNameCtrl.text.trim(),
         company:   _companyCtrl.text.trim(),
@@ -81,6 +132,16 @@ class _RegisterScreenState extends State<RegisterScreen> {
         linkedin:  _linkedinCtrl.text.trim(),
         bio:       _bioCtrl.text.trim(),
       );
+
+      // 2. L'UID è ora disponibile — carica la foto su Firebase Storage
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid != null) {
+        final url = await StorageService.instance.uploadAvatar(uid, _pickedImage!);
+        if (url != null && url.isNotEmpty) {
+          // 3. Aggiorna il documento Firestore e propaga ai contatti
+          await AuthService.instance.updateAvatar(uid, url);
+        }
+      }
 
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
@@ -108,6 +169,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
+  // ── Helpers UI ───────────────────────────────────────────────────────────────
+
   Widget _buildField({
     required TextEditingController controller,
     required String label,
@@ -121,8 +184,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }) {
     return TextFormField(
       controller: controller,
-      // I campi multiriga devono usare TextInputType.multiline,
-      // altrimenti Flutter crasha con TextInputAction.newline.
       keyboardType: maxLines > 1 ? TextInputType.multiline : keyboardType,
       obscureText: obscure,
       maxLines: maxLines,
@@ -150,10 +211,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  // ── Step 0: Dati profilo ────────────────────────────────────────────────────
+  // ── Step 0: Dati profilo ─────────────────────────────────────────────────────
+
   Widget _buildProfiloStep() {
     return Column(
       children: [
+        // ── Foto profilo (obbligatoria) ─────────────────────────────────────
+        _PhotoPicker(
+          pickedImage: _pickedImage,
+          hasError: _photoError,
+          onTap: _pickPhoto,
+        ),
+
+        const SizedBox(height: 20),
+
+        // ── Nome e Cognome ──────────────────────────────────────────────────
         Row(
           children: [
             Expanded(
@@ -233,7 +305,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
     );
   }
 
-  // ── Step 1: Credenziali account ─────────────────────────────────────────────
+  // ── Step 1: Credenziali account ──────────────────────────────────────────────
+
   Widget _buildAccountStep() {
     return Column(
       children: [
@@ -281,6 +354,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
       ],
     );
   }
+
+  // ── Build ────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -430,6 +505,140 @@ class _RegisterScreenState extends State<RegisterScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ── Widget foto profilo ──────────────────────────────────────────────────────
+
+class _PhotoPicker extends StatelessWidget {
+  final File? pickedImage;
+  final bool hasError;
+  final VoidCallback onTap;
+
+  const _PhotoPicker({
+    required this.pickedImage,
+    required this.hasError,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        // Label
+        Row(
+          children: [
+            const Text(
+              'Foto profilo',
+              style: TextStyle(
+                color: Color(0xFF8BA3C7),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '(obbligatoria)',
+              style: TextStyle(
+                color: hasError ? const Color(0xFFEF5350) : const Color(0xFF4D8EF7),
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+
+        // Avatar circolare cliccabile
+        Center(
+          child: GestureDetector(
+            onTap: onTap,
+            child: Stack(
+              alignment: Alignment.bottomRight,
+              children: [
+                // Cerchio principale
+                Container(
+                  width: 96,
+                  height: 96,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xFF101E35),
+                    border: Border.all(
+                      color: hasError
+                          ? const Color(0xFFEF5350)
+                          : pickedImage != null
+                              ? const Color(0xFF4D8EF7)
+                              : const Color(0xFF1A2D47),
+                      width: 2,
+                    ),
+                    boxShadow: pickedImage != null || hasError
+                        ? [
+                            BoxShadow(
+                              color: (hasError
+                                      ? const Color(0xFFEF5350)
+                                      : const Color(0xFF4D8EF7))
+                                  .withOpacity(0.25),
+                              blurRadius: 16,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: pickedImage != null
+                      ? ClipOval(
+                          child: Image.file(
+                            pickedImage!,
+                            width: 96,
+                            height: 96,
+                            fit: BoxFit.cover,
+                          ),
+                        )
+                      : Icon(
+                          Icons.person_outline,
+                          size: 40,
+                          color: hasError
+                              ? const Color(0xFFEF5350)
+                              : const Color(0xFF4A6080),
+                        ),
+                ),
+
+                // Badge fotocamera
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A56DB),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xFF0D1B30),
+                      width: 2,
+                    ),
+                  ),
+                  child: const Icon(
+                    Icons.camera_alt,
+                    size: 14,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        const SizedBox(height: 8),
+
+        // Testo sotto
+        Center(
+          child: Text(
+            pickedImage != null ? 'Tocca per cambiare' : 'Tocca per aggiungere',
+            style: TextStyle(
+              fontSize: 12,
+              color: pickedImage != null
+                  ? const Color(0xFF4D8EF7)
+                  : const Color(0xFF4A6080),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -1,9 +1,26 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 
 import '../core/logger.dart';
+import '../core/linkedin_config.dart';
 import '../models/user_model.dart';
+
+/// Risultato del login LinkedIn.
+/// Se [isNewUser] è true, il caller deve mostrare la schermata
+/// di completamento profilo (company, role, ecc.).
+class LinkedInSignInResult {
+  final UserCredential credential;
+  final bool isNewUser;
+  final Map<String, dynamic> linkedInProfile;
+
+  const LinkedInSignInResult({
+    required this.credential,
+    required this.isNewUser,
+    required this.linkedInProfile,
+  });
+}
 
 /// Gestisce login, registrazione e aggiornamento profilo.
 /// Singleton: usa sempre AuthService.instance.
@@ -13,6 +30,7 @@ class AuthService {
 
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseFunctions _functions = FirebaseFunctions.instance;
 
   User? get currentUser => _auth.currentUser;
   Stream<User?> get authStateChanges => _auth.authStateChanges();
@@ -105,6 +123,90 @@ class AuthService {
     }
   }
 
+  // ── LINKEDIN LOGIN ──────────────────────────────────────────────────────────
+
+  /// Completa il flusso OAuth LinkedIn:
+  /// 1. Chiama la Cloud Function `linkedinAuth` con il codice OAuth
+  /// 2. La Function scambia il codice con LinkedIn, crea l'utente Firebase
+  /// 3. Fa il login con Custom Token
+  ///
+  /// Restituisce [LinkedInSignInResult] con:
+  ///   - [isNewUser]: se true → mostrare schermata completamento profilo
+  ///   - [linkedInProfile]: dati già disponibili da LinkedIn (nome, foto, email)
+  Future<LinkedInSignInResult> signInWithLinkedIn(String authCode) async {
+    try {
+      // 1. Chiama la Cloud Function
+      final callable = _functions.httpsCallable('linkedinAuth');
+      final result = await callable.call({
+        'code': authCode,
+        'redirectUri': LinkedInConfig.redirectUri,
+        'clientId': LinkedInConfig.clientId,
+      });
+
+      final data = result.data as Map<dynamic, dynamic>;
+      final customToken = data['customToken'] as String;
+      final isNewUser = data['isNewUser'] as bool? ?? true;
+      final profile = Map<String, dynamic>.from(
+        data['profile'] as Map<dynamic, dynamic>,
+      );
+
+      // 2. Login Firebase con custom token
+      final credential = await _auth.signInWithCustomToken(customToken);
+
+      Log.d('AUTH', 'LinkedIn login OK - uid: ${credential.user?.uid}, newUser: $isNewUser');
+
+      return LinkedInSignInResult(
+        credential: credential,
+        isNewUser: isNewUser,
+        linkedInProfile: profile,
+      );
+    } catch (e) {
+      Log.e('AUTH', 'Errore LinkedIn signIn', e);
+      rethrow;
+    }
+  }
+
+  /// Crea il documento Firestore per un nuovo utente LinkedIn.
+  /// Chiamato dalla schermata di completamento profilo.
+  Future<void> createLinkedInUserProfile({
+    required String uid,
+    required String firstName,
+    required String lastName,
+    required String email,
+    required String company,
+    required String role,
+    required String avatarURL,
+    String? bio,
+    String? phone,
+    String? linkedinUrl,
+  }) async {
+    final user = UserModel(
+      uid: uid,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      email: email.trim().toLowerCase(),
+      company: company.trim(),
+      role: role.trim(),
+      avatarURL: avatarURL.trim(),
+      linkedin: _normalizeOptional(linkedinUrl),
+      bio: _normalizeOptional(bio),
+      phone: _normalizeOptional(phone),
+      createdAt: DateTime.now(),
+    );
+
+    await _db.collection('users').doc(uid).set(user.toMap());
+
+    try {
+      await _auth.currentUser?.updateDisplayName(user.fullName);
+    } catch (e) {
+      Log.e('AUTH', 'Errore updateDisplayName LinkedIn profile', e);
+    }
+
+    Log.d('AUTH', 'Profilo LinkedIn creato per uid: $uid');
+  }
+
+  // ── METODI ESISTENTI ────────────────────────────────────────────────────────
+
   Future<void> logout() async {
     await _auth.signOut();
   }
@@ -120,19 +222,13 @@ class AuthService {
   }
 
   /// Cambia la foto profilo e la propaga nel wallet di tutti i contatti.
-  /// Se aggiornassimo solo users/{uid}, il wallet degli altri resterebbe
-  /// con la vecchia foto perché il documento contatto non cambia
-  /// e lo stream non si risveglia.
   Future<void> updateAvatar(String uid, String avatarURL) async {
     final normalizedUrl = avatarURL.trim();
 
-    // 1. Aggiorna il documento principale su Firestore.
     await _db.collection('users').doc(uid).set({
       'avatarURL': normalizedUrl,
     }, SetOptions(merge: true));
 
-    // 2. Per ogni contatto, aggiorna la mia entry nel loro wallet
-    //    così vedono subito la nuova foto senza riaprire l'app.
     try {
       final myContactsSnap = await _db
           .collection('connections')
@@ -170,7 +266,6 @@ class AuthService {
         'Avatar propagato a ${myContactsSnap.docs.length} contatti',
       );
     } catch (e) {
-      // Se questa parte fallisce non è grave, il profilo principale è già salvato.
       Log.e('AUTH', 'Errore propagazione avatar ai contatti', e);
     }
   }
