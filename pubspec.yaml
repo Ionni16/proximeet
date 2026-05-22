@@ -2,7 +2,7 @@ name: ProxiMeet
 description: "ProxiMeet - Proximity networking for conferences"
 publish_to: 'none'
 
-version: 1.0.0+41
+version: 1.0.0+42
 
 environment:
   sdk: ^3.11.4
@@ -61,9 +61,10 @@ flutter:
 
 flutter_native_splash:
   color: "#060D1A"
-  image: assets/icon/app_icon.png
+  image: assets/icon/app_icon.png        # Android: logo centrato
   color_android: "#060D1A"
   color_ios: "#060D1A"
+  image_ios: ""                          # iOS: solo colore, niente logo
   android_12:
     color: "#060D1A"
     image: assets/icon/app_icon.png
