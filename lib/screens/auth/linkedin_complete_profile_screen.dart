@@ -1,11 +1,8 @@
 // lib/screens/auth/linkedin_complete_profile_screen.dart
 //
-// Mostrata solo ai nuovi utenti che si registrano via LinkedIn.
-// Dati da LinkedIn: firstName, lastName, email, photo (pre-compilati, editabili).
-// Dati da compilare: company (obbligatorio), role (obbligatorio),
-//                    phone (opzionale), bio (opzionale).
-// Foto: usa quella LinkedIn se disponibile, altrimenti picker obbligatorio.
-//       L'utente può sempre sostituire la foto LinkedIn con una locale.
+// Usata per nuovi utenti LinkedIn E Apple.
+// Chiavi mappa attese:
+//   firstName, lastName, email, photoURL, loginProvider ('linkedin'|'apple')
 
 import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -17,7 +14,6 @@ import '../../services/storage_service.dart';
 import '../events/event_list_screen.dart';
 
 class LinkedInCompleteProfileScreen extends StatefulWidget {
-  /// Dati ricevuti da LinkedIn (nome, cognome, email, foto).
   final Map<String, dynamic> linkedInProfile;
 
   const LinkedInCompleteProfileScreen({
@@ -34,35 +30,32 @@ class _LinkedInCompleteProfileScreenState
     extends State<LinkedInCompleteProfileScreen> {
   final _formKey = GlobalKey<FormState>();
 
-  // ── Campi editabili (pre-compilati da LinkedIn) ──────────────────────────────
   late final TextEditingController _firstNameCtrl;
   late final TextEditingController _lastNameCtrl;
-
-  // ── Campi da compilare ────────────────────────────────────────────────────────
+  late final TextEditingController _emailCtrl;
   late final TextEditingController _companyCtrl;
   late final TextEditingController _roleCtrl;
   late final TextEditingController _bioCtrl;
   late final TextEditingController _phoneCtrl;
 
-  // ── Email da LinkedIn (read-only) ────────────────────────────────────────────
-  late final String _linkedinEmail;
+  late final String _photoUrl;
+  late final String _loginProvider; // 'linkedin' | 'apple'
+  late final bool _emailEditable;   // true se Apple senza email
 
-  // ── Foto ─────────────────────────────────────────────────────────────────────
-  late final String _linkedinPhotoUrl; // URL da LinkedIn (può essere vuoto)
-  File? _localPhoto;                   // foto scelta localmente (sovrascrive LinkedIn)
-  bool _photoError = false;            // bordo rosso se obbligatoria e mancante
+  File? _localPhoto;
+  bool _photoError = false;
 
   bool _loading = false;
   String? _errorMessage;
 
-  // Foto finale: locale se scelta, LinkedIn se disponibile, altrimenti null
-  bool get _hasPhoto =>
-      _localPhoto != null || _linkedinPhotoUrl.isNotEmpty;
+  bool get _hasPhoto => _localPhoto != null || _photoUrl.isNotEmpty;
 
   @override
   void initState() {
     super.initState();
     final p = widget.linkedInProfile;
+
+    _loginProvider = (p['loginProvider'] as String? ?? 'linkedin');
 
     _firstNameCtrl = TextEditingController(
       text: (p['firstName'] as String? ?? '').trim(),
@@ -70,8 +63,13 @@ class _LinkedInCompleteProfileScreenState
     _lastNameCtrl = TextEditingController(
       text: (p['lastName'] as String? ?? '').trim(),
     );
-    _linkedinEmail   = (p['email']    as String? ?? '').trim();
-    _linkedinPhotoUrl = (p['photoURL'] as String? ?? '').trim();
+
+    final email = (p['email'] as String? ?? '').trim();
+    _emailCtrl = TextEditingController(text: email);
+    // Se è Apple e non ha email (ha nascosto), il campo è editabile
+    _emailEditable = _loginProvider == 'apple' && email.isEmpty;
+
+    _photoUrl = (p['photoURL'] as String? ?? '').trim();
 
     _companyCtrl = TextEditingController();
     _roleCtrl    = TextEditingController();
@@ -83,14 +81,13 @@ class _LinkedInCompleteProfileScreenState
   void dispose() {
     _firstNameCtrl.dispose();
     _lastNameCtrl.dispose();
+    _emailCtrl.dispose();
     _companyCtrl.dispose();
     _roleCtrl.dispose();
     _bioCtrl.dispose();
     _phoneCtrl.dispose();
     super.dispose();
   }
-
-  // ── Selezione foto locale ────────────────────────────────────────────────────
 
   Future<void> _pickPhoto() async {
     final file = await StorageService.instance.pickImage();
@@ -101,10 +98,7 @@ class _LinkedInCompleteProfileScreenState
     });
   }
 
-  // ── Salvataggio profilo ──────────────────────────────────────────────────────
-
   Future<void> _saveProfile() async {
-    // Validazione foto
     if (!_hasPhoto) {
       setState(() {
         _photoError = true;
@@ -125,11 +119,9 @@ class _LinkedInCompleteProfileScreenState
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) throw Exception('Utente non autenticato');
 
-      // Determina l'URL dell'avatar finale
-      String avatarURL = _linkedinPhotoUrl; // default: foto LinkedIn
+      String avatarURL = _photoUrl;
 
       if (_localPhoto != null) {
-        // L'utente ha scelto una foto locale → carica su Firebase Storage
         final uploadedUrl =
             await StorageService.instance.uploadAvatar(uid, _localPhoto!);
         if (uploadedUrl != null && uploadedUrl.isNotEmpty) {
@@ -137,17 +129,16 @@ class _LinkedInCompleteProfileScreenState
         }
       }
 
-      // Salva il profilo su Firestore
       await AuthService.instance.createLinkedInUserProfile(
-        uid: uid,
-        firstName: _firstNameCtrl.text.trim(),
-        lastName:  _lastNameCtrl.text.trim(),
-        email:     _linkedinEmail,
-        company:   _companyCtrl.text.trim(),
-        role:      _roleCtrl.text.trim(),
-        avatarURL: avatarURL,
-        bio:       _bioCtrl.text.trim(),
-        phone:     _phoneCtrl.text.trim(),
+        uid:        uid,
+        firstName:  _firstNameCtrl.text.trim(),
+        lastName:   _lastNameCtrl.text.trim(),
+        email:      _emailCtrl.text.trim(),
+        company:    _companyCtrl.text.trim(),
+        role:       _roleCtrl.text.trim(),
+        avatarURL:  avatarURL,
+        bio:        _bioCtrl.text.trim(),
+        phone:      _phoneCtrl.text.trim(),
         linkedinUrl: null,
       );
 
@@ -164,7 +155,7 @@ class _LinkedInCompleteProfileScreenState
     }
   }
 
-  // ── Build ────────────────────────────────────────────────────────────────────
+  bool get _isApple => _loginProvider == 'apple';
 
   @override
   Widget build(BuildContext context) {
@@ -183,13 +174,12 @@ class _LinkedInCompleteProfileScreenState
                   children: [
                     const SizedBox(height: 40),
 
-                    // ── Header ────────────────────────────────────────────────
+                    // ── Header ──────────────────────────────────────────────────
                     Center(
                       child: Column(
                         children: [
-                          // Foto: locale > LinkedIn > placeholder
                           _AvatarPicker(
-                            linkedinPhotoUrl: _linkedinPhotoUrl,
+                            photoUrl: _photoUrl,
                             localPhoto: _localPhoto,
                             hasError: _photoError,
                             onTap: _pickPhoto,
@@ -218,25 +208,34 @@ class _LinkedInCompleteProfileScreenState
 
                     const SizedBox(height: 32),
 
-                    // ── Badge LinkedIn ─────────────────────────────────────────
-                    if (_linkedinEmail.isNotEmpty)
+                    // ── Badge provider ───────────────────────────────────────────
+                    if (_emailCtrl.text.isNotEmpty && !_emailEditable)
                       Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF0A66C2).withOpacity(0.08),
+                          color: (_isApple
+                                  ? Colors.white
+                                  : const Color(0xFF0A66C2))
+                              .withOpacity(0.08),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: const Color(0xFF0A66C2).withOpacity(0.25),
+                            color: (_isApple
+                                    ? Colors.white
+                                    : const Color(0xFF0A66C2))
+                                .withOpacity(0.25),
                           ),
                         ),
                         child: Row(
                           children: [
-                            _LinkedInBadge(),
+                            _isApple
+                                ? const Icon(Icons.apple,
+                                    color: Color(0xFF8BA3C7), size: 20)
+                                : _LinkedInBadge(),
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
-                                _linkedinEmail,
+                                _emailCtrl.text,
                                 style: const TextStyle(
                                   color: Color(0xFF8BA3C7),
                                   fontSize: 13,
@@ -250,9 +249,39 @@ class _LinkedInCompleteProfileScreenState
                         ),
                       ),
 
+                    // ── Avviso Apple senza email ─────────────────────────────────
+                    if (_emailEditable)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFB45309).withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: const Color(0xFFB45309).withOpacity(0.3),
+                          ),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.info_outline,
+                                color: Color(0xFFFBBF24), size: 16),
+                            SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Hai scelto di nascondere l\'email Apple. Inserisci un\'email di contatto.',
+                                style: TextStyle(
+                                  color: Color(0xFFFBBF24),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
                     const SizedBox(height: 20),
 
-                    // ── Card principale ────────────────────────────────────────
+                    // ── Card principale ──────────────────────────────────────────
                     Container(
                       padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
@@ -270,11 +299,13 @@ class _LinkedInCompleteProfileScreenState
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // ── Sezione: Dati personali ─────────────────────────
+                          // ── Dati personali ──────────────────────────────────
                           _SectionLabel(
                             icon: Icons.person_outline,
                             label: 'Dati personali',
-                            sublabel: 'Pre-compilati da LinkedIn — modificabili',
+                            sublabel: _isApple
+                                ? 'Da Apple — modificabili'
+                                : 'Pre-compilati da LinkedIn — modificabili',
                           ),
                           const SizedBox(height: 14),
 
@@ -302,9 +333,27 @@ class _LinkedInCompleteProfileScreenState
                             ],
                           ),
 
+                          // ── Email editabile (Apple senza email) ─────────────
+                          if (_emailEditable) ...[
+                            const SizedBox(height: 14),
+                            _buildField(
+                              controller: _emailCtrl,
+                              label: 'Email *',
+                              icon: Icons.alternate_email,
+                              keyboardType: TextInputType.emailAddress,
+                              validator: (v) {
+                                if (v == null || v.trim().isEmpty) {
+                                  return 'Email obbligatoria';
+                                }
+                                if (!v.contains('@')) return 'Email non valida';
+                                return null;
+                              },
+                            ),
+                          ],
+
                           const SizedBox(height: 24),
 
-                          // ── Sezione: Profilo professionale ──────────────────
+                          // ── Profilo professionale ───────────────────────────
                           _SectionLabel(
                             icon: Icons.work_outline,
                             label: 'Profilo professionale',
@@ -331,7 +380,7 @@ class _LinkedInCompleteProfileScreenState
 
                           const SizedBox(height: 24),
 
-                          // ── Sezione: Info aggiuntive ────────────────────────
+                          // ── Info aggiuntive ─────────────────────────────────
                           _SectionLabel(
                             icon: Icons.info_outline,
                             label: 'Info aggiuntive',
@@ -357,7 +406,7 @@ class _LinkedInCompleteProfileScreenState
                       ),
                     ),
 
-                    // ── Errore ─────────────────────────────────────────────────
+                    // ── Errore ───────────────────────────────────────────────────
                     if (_errorMessage != null) ...[
                       const SizedBox(height: 16),
                       Container(
@@ -390,7 +439,6 @@ class _LinkedInCompleteProfileScreenState
 
                     const SizedBox(height: 24),
 
-                    // ── Bottone salva ──────────────────────────────────────────
                     _GradientButton(
                       onPressed: _loading ? null : _saveProfile,
                       child: _loading
@@ -450,22 +498,22 @@ class _LinkedInCompleteProfileScreenState
   }
 }
 
-// ── Widget: Avatar Picker ────────────────────────────────────────────────────
+// ── Widget: Avatar Picker ─────────────────────────────────────────────────────
 
 class _AvatarPicker extends StatelessWidget {
-  final String linkedinPhotoUrl;
+  final String photoUrl;
   final File? localPhoto;
   final bool hasError;
   final VoidCallback onTap;
 
   const _AvatarPicker({
-    required this.linkedinPhotoUrl,
+    required this.photoUrl,
     required this.localPhoto,
     required this.hasError,
     required this.onTap,
   });
 
-  bool get _hasPhoto => localPhoto != null || linkedinPhotoUrl.isNotEmpty;
+  bool get _hasPhoto => localPhoto != null || photoUrl.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
@@ -476,7 +524,6 @@ class _AvatarPicker extends StatelessWidget {
           child: Stack(
             alignment: Alignment.bottomRight,
             children: [
-              // Avatar
               Container(
                 width: 96,
                 height: 96,
@@ -505,8 +552,6 @@ class _AvatarPicker extends StatelessWidget {
                 ),
                 child: ClipOval(child: _buildAvatarContent()),
               ),
-
-              // Badge fotocamera
               Container(
                 width: 30,
                 height: 30,
@@ -528,14 +573,14 @@ class _AvatarPicker extends StatelessWidget {
         Text(
           localPhoto != null
               ? 'Tocca per cambiare foto'
-              : linkedinPhotoUrl.isNotEmpty
-                  ? 'Foto LinkedIn — tocca per cambiare'
+              : photoUrl.isNotEmpty
+                  ? 'Foto profilo — tocca per cambiare'
                   : 'Aggiungi foto profilo (obbligatoria)',
           style: TextStyle(
             fontSize: 12,
             color: hasError
                 ? const Color(0xFFEF5350)
-                : linkedinPhotoUrl.isNotEmpty || localPhoto != null
+                : photoUrl.isNotEmpty || localPhoto != null
                     ? const Color(0xFF0A66C2)
                     : const Color(0xFF4A6080),
           ),
@@ -545,18 +590,12 @@ class _AvatarPicker extends StatelessWidget {
   }
 
   Widget _buildAvatarContent() {
-    // Priorità: foto locale > foto LinkedIn > placeholder
     if (localPhoto != null) {
-      return Image.file(
-        localPhoto!,
-        width: 96,
-        height: 96,
-        fit: BoxFit.cover,
-      );
+      return Image.file(localPhoto!, width: 96, height: 96, fit: BoxFit.cover);
     }
-    if (linkedinPhotoUrl.isNotEmpty) {
+    if (photoUrl.isNotEmpty) {
       return CachedNetworkImage(
-        imageUrl: linkedinPhotoUrl,
+        imageUrl: photoUrl,
         width: 96,
         height: 96,
         fit: BoxFit.cover,
@@ -581,7 +620,7 @@ class _DefaultAvatarContent extends StatelessWidget {
   }
 }
 
-// ── Widget: Section Label ────────────────────────────────────────────────────
+// ── Widget: Section Label ─────────────────────────────────────────────────────
 
 class _SectionLabel extends StatelessWidget {
   final IconData icon;
@@ -603,21 +642,14 @@ class _SectionLabel extends StatelessWidget {
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFFE8F0FE),
-              ),
-            ),
-            Text(
-              sublabel,
-              style: const TextStyle(
-                fontSize: 11,
-                color: Color(0xFF4A6080),
-              ),
-            ),
+            Text(label,
+                style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFFE8F0FE))),
+            Text(sublabel,
+                style: const TextStyle(
+                    fontSize: 11, color: Color(0xFF4A6080))),
           ],
         ),
       ],
@@ -638,21 +670,18 @@ class _LinkedInBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(4),
       ),
       child: const Center(
-        child: Text(
-          'in',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w900,
-            fontSize: 10,
-            letterSpacing: -0.5,
-          ),
-        ),
+        child: Text('in',
+            style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+                fontSize: 10,
+                letterSpacing: -0.5)),
       ),
     );
   }
 }
 
-// ── Widget: Background Glow ──────────────────────────────────────────────────
+// ── Widget: Background Glow ───────────────────────────────────────────────────
 
 class _BackgroundGlow extends StatelessWidget {
   const _BackgroundGlow();
@@ -688,7 +717,7 @@ class _BackgroundGlow extends StatelessWidget {
   }
 }
 
-// ── Widget: Gradient Button ──────────────────────────────────────────────────
+// ── Widget: Gradient Button ───────────────────────────────────────────────────
 
 class _GradientButton extends StatelessWidget {
   final VoidCallback? onPressed;

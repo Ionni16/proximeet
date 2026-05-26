@@ -2,7 +2,7 @@ name: ProxiMeet
 description: "ProxiMeet - Proximity networking for conferences"
 publish_to: 'none'
 
-version: 1.0.0+45
+version: 1.0.0+47
 
 environment:
   sdk: ^3.11.4
@@ -38,6 +38,9 @@ dependencies:
 
   # OAuth WebView (per LinkedIn login)
   webview_flutter: ^4.10.0    # ← NUOVO: webview per OAuth LinkedIn
+  # Apple Sign In
+  sign_in_with_apple: ^6.1.4
+  crypto: ^3.0.3
 
   # Utility
   intl: ^0.20.2

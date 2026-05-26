@@ -1,15 +1,18 @@
+import 'dart:convert';
+import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../core/logger.dart';
 import '../core/linkedin_config.dart';
 import '../models/user_model.dart';
 
 /// Risultato del login LinkedIn.
-/// Se [isNewUser] è true, il caller deve mostrare la schermata
-/// di completamento profilo (company, role, ecc.).
 class LinkedInSignInResult {
   final UserCredential credential;
   final bool isNewUser;
@@ -19,6 +22,23 @@ class LinkedInSignInResult {
     required this.credential,
     required this.isNewUser,
     required this.linkedInProfile,
+  });
+}
+
+/// Risultato del login Apple.
+class AppleSignInResult {
+  final UserCredential credential;
+  final bool isNewUser;
+  final String? email;
+  final String? firstName;
+  final String? lastName;
+
+  const AppleSignInResult({
+    required this.credential,
+    required this.isNewUser,
+    this.email,
+    this.firstName,
+    this.lastName,
   });
 }
 
@@ -37,7 +57,6 @@ class AuthService {
 
   Future<UserCredential> login(String email, String password) async {
     final normalizedEmail = email.trim().toLowerCase();
-
     return _auth.signInWithEmailAndPassword(
       email: normalizedEmail,
       password: password,
@@ -123,19 +142,94 @@ class AuthService {
     }
   }
 
+  // ── APPLE SIGN IN ────────────────────────────────────────────────────────────
+
+  /// Esegue il login con Sign in with Apple + Firebase.
+  /// Restituisce [AppleSignInResult] con:
+  ///   - [isNewUser]: se true → mostrare schermata completamento profilo
+  ///   - email/firstName/lastName: disponibili SOLO alla prima autenticazione
+  Future<AppleSignInResult> signInWithApple() async {
+    // Genera nonce sicuro per prevenire replay attacks
+    final rawNonce = _generateNonce();
+    final nonce = _sha256ofString(rawNonce);
+
+    try {
+      // 1. Richiedi credenziale Apple
+      final appleCredential = await SignInWithApple.getAppleIDCredential(
+        scopes: [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+        nonce: nonce,
+      );
+
+      // 2. Crea credenziale OAuth Firebase
+      final oauthCredential = OAuthProvider('apple.com').credential(
+        idToken: appleCredential.identityToken,
+        rawNonce: rawNonce,
+      );
+
+      // 3. Login Firebase
+      final userCredential = await _auth.signInWithCredential(oauthCredential);
+      final firebaseUser = userCredential.user;
+      if (firebaseUser == null) throw Exception('Login Apple fallito');
+
+      final uid = firebaseUser.uid;
+
+      // 4. Controlla se è nuovo utente
+      final isNewUser = userCredential.additionalUserInfo?.isNewUser ?? false;
+
+      // Email e nome: Apple li manda SOLO alla prima autenticazione
+      final email = appleCredential.email ?? firebaseUser.email;
+      final firstName = appleCredential.givenName;
+      final lastName = appleCredential.familyName;
+
+      // 5. Se nuovo utente e abbiamo dati minimi, salviamo subito email
+      if (isNewUser && email != null) {
+        await _db.collection('users').doc(uid).set({
+          'email': email.trim().toLowerCase(),
+          'firstName': firstName?.trim() ?? '',
+          'lastName': lastName?.trim() ?? '',
+          'avatarURL': firebaseUser.photoURL ?? '',
+          'createdAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+
+      Log.d('AUTH', 'Apple login OK - uid: $uid, newUser: $isNewUser');
+
+      return AppleSignInResult(
+        credential: userCredential,
+        isNewUser: isNewUser,
+        email: email,
+        firstName: firstName,
+        lastName: lastName,
+      );
+    } catch (e) {
+      Log.e('AUTH', 'Errore Apple signIn', e);
+      rethrow;
+    }
+  }
+
+  /// Genera un nonce casuale per Apple Sign In
+  String _generateNonce([int length = 32]) {
+    const charset =
+        '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
+    final random = Random.secure();
+    return List.generate(length, (_) => charset[random.nextInt(charset.length)])
+        .join();
+  }
+
+  /// SHA-256 del nonce
+  String _sha256ofString(String input) {
+    final bytes = utf8.encode(input);
+    final digest = sha256.convert(bytes);
+    return digest.toString();
+  }
+
   // ── LINKEDIN LOGIN ──────────────────────────────────────────────────────────
 
-  /// Completa il flusso OAuth LinkedIn:
-  /// 1. Chiama la Cloud Function `linkedinAuth` con il codice OAuth
-  /// 2. La Function scambia il codice con LinkedIn, crea l'utente Firebase
-  /// 3. Fa il login con Custom Token
-  ///
-  /// Restituisce [LinkedInSignInResult] con:
-  ///   - [isNewUser]: se true → mostrare schermata completamento profilo
-  ///   - [linkedInProfile]: dati già disponibili da LinkedIn (nome, foto, email)
   Future<LinkedInSignInResult> signInWithLinkedIn(String authCode) async {
     try {
-      // 1. Chiama la Cloud Function
       final callable = _functions.httpsCallable('linkedinAuth');
       final result = await callable.call({
         'code': authCode,
@@ -150,7 +244,6 @@ class AuthService {
         data['profile'] as Map<dynamic, dynamic>,
       );
 
-      // 2. Login Firebase con custom token
       final credential = await _auth.signInWithCustomToken(customToken);
 
       Log.d('AUTH', 'LinkedIn login OK - uid: ${credential.user?.uid}, newUser: $isNewUser');
@@ -166,8 +259,6 @@ class AuthService {
     }
   }
 
-  /// Crea il documento Firestore per un nuovo utente LinkedIn.
-  /// Chiamato dalla schermata di completamento profilo.
   Future<void> createLinkedInUserProfile({
     required String uid,
     required String firstName,
@@ -205,7 +296,7 @@ class AuthService {
     Log.d('AUTH', 'Profilo LinkedIn creato per uid: $uid');
   }
 
-  // ── METODI ESISTENTI ────────────────────────────────────────────────────────
+  // ── METODI COMUNI ────────────────────────────────────────────────────────────
 
   Future<void> logout() async {
     await _auth.signOut();
@@ -221,7 +312,6 @@ class AuthService {
     return UserModel.fromMap(data);
   }
 
-  /// Cambia la foto profilo e la propaga nel wallet di tutti i contatti.
   Future<void> updateAvatar(String uid, String avatarURL) async {
     final normalizedUrl = avatarURL.trim();
 
@@ -261,10 +351,7 @@ class AuthService {
       }
 
       await batch.commit();
-      Log.d(
-        'AUTH',
-        'Avatar propagato a ${myContactsSnap.docs.length} contatti',
-      );
+      Log.d('AUTH', 'Avatar propagato a ${myContactsSnap.docs.length} contatti');
     } catch (e) {
       Log.e('AUTH', 'Errore propagazione avatar ai contatti', e);
     }
@@ -284,16 +371,6 @@ class AuthService {
           normalized[key] = value.trim().toLowerCase();
         } else if (key == 'twitter') {
           normalized[key] = _normalizeTwitter(value);
-        } else if (key == 'phone' ||
-            key == 'linkedin' ||
-            key == 'github' ||
-            key == 'bio' ||
-            key == 'firstName' ||
-            key == 'lastName' ||
-            key == 'company' ||
-            key == 'role' ||
-            key == 'avatarURL') {
-          normalized[key] = value.trim();
         } else {
           normalized[key] = value.trim();
         }
@@ -330,7 +407,6 @@ class AuthService {
 
     try {
       final messaging = FirebaseMessaging.instance;
-
       await messaging.requestPermission();
 
       final token = await messaging.getToken();

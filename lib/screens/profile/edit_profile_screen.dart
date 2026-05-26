@@ -165,7 +165,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       padding: const EdgeInsets.only(bottom: 16),
       child: TextFormField(
         controller: controller,
-        keyboardType: keyboard,
+        keyboardType: maxLines > 1 ? TextInputType.multiline : keyboard,
         maxLines: maxLines,
         validator: validator,
         autovalidateMode: AutovalidateMode.onUserInteraction,

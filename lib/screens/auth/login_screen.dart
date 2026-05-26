@@ -1,9 +1,8 @@
 // lib/screens/auth/login_screen.dart
-// Design: Premium dark networking app — deep navy, electric blue accents,
-// particle-like animated rings, glassmorphism card.
 
 import 'dart:math' show sin, cos, pi;
 import 'package:flutter/material.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import '../../services/auth_service.dart';
 import '../../core/logger.dart';
 import 'register_screen.dart';
@@ -29,6 +28,7 @@ class _LoginScreenState extends State<LoginScreen>
 
   bool _loading         = false;
   bool _linkedInLoading = false;
+  bool _appleLoading    = false;
   bool _obscurePassword = true;
   String? _errorMessage;
 
@@ -53,6 +53,8 @@ class _LoginScreenState extends State<LoginScreen>
     _fadeCtrl.dispose();
     super.dispose();
   }
+
+  bool get _anyLoading => _loading || _linkedInLoading || _appleLoading;
 
   // ── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -88,11 +90,10 @@ class _LoginScreenState extends State<LoginScreen>
       if (!mounted) return;
 
       if (signInResult.isNewUser) {
-        if (!mounted) return;
         await Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => LinkedInCompleteProfileScreen(
-              linkedInProfile: signInResult.linkedInProfile,
+              linkedInProfile: {...signInResult.linkedInProfile, 'loginProvider': 'linkedin'},
             ),
           ),
         );
@@ -109,11 +110,10 @@ class _LoginScreenState extends State<LoginScreen>
             existingProfile.role.isEmpty;
         if (!mounted) return;
         if (needsCompletion) {
-          Log.d('LOGIN', 'Profilo LinkedIn incompleto, redirect a completamento');
           await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => LinkedInCompleteProfileScreen(
-                linkedInProfile: signInResult.linkedInProfile,
+                linkedInProfile: {...signInResult.linkedInProfile, 'loginProvider': 'linkedin'},
               ),
             ),
           );
@@ -132,6 +132,74 @@ class _LoginScreenState extends State<LoginScreen>
     }
   }
 
+  Future<void> _loginWithApple() async {
+    setState(() { _appleLoading = true; _errorMessage = null; });
+    try {
+      final result = await _authService.signInWithApple();
+      if (!mounted) return;
+
+      if (result.isNewUser) {
+        // Nuovo utente Apple → va alla schermata di completamento profilo
+        // Riusiamo la schermata LinkedIn passando i dati Apple come mappa
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => LinkedInCompleteProfileScreen(
+              linkedInProfile: {
+                'firstName': result.firstName ?? '',
+                'lastName': result.lastName ?? '',
+                'email': result.email ?? '',
+                'photoURL': '',
+                  'loginProvider': 'apple',
+              },
+            ),
+          ),
+        );
+        return;
+      }
+
+      if (!mounted) return;
+      final uid = _authService.currentUser?.uid;
+      if (uid != null) {
+        final existingProfile = await _authService.getUserProfile(uid);
+        final needsCompletion = existingProfile == null ||
+            existingProfile.company.isEmpty ||
+            existingProfile.role.isEmpty;
+        if (!mounted) return;
+        if (needsCompletion) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => LinkedInCompleteProfileScreen(
+                linkedInProfile: {
+                  'firstName': result.firstName ?? '',
+                  'lastName': result.lastName ?? '',
+                  'email': result.email ?? '',
+                  'photoURL': '',
+                  'loginProvider': 'apple',
+                },
+              ),
+            ),
+          );
+        } else {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const EventListScreen()),
+            (route) => false,
+          );
+        }
+      }
+    } on SignInWithAppleAuthorizationException catch (e) {
+      if (e.code == AuthorizationErrorCode.canceled) {
+        // Utente ha annullato, non mostrare errore
+      } else {
+        if (mounted) setState(() => _errorMessage = 'Errore accesso con Apple. Riprova.');
+      }
+    } catch (e) {
+      Log.e('LOGIN', 'Errore Apple login', e);
+      if (mounted) setState(() => _errorMessage = 'Errore accesso con Apple. Riprova.');
+    } finally {
+      if (mounted) setState(() => _appleLoading = false);
+    }
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────────
 
   @override
@@ -140,10 +208,7 @@ class _LoginScreenState extends State<LoginScreen>
       backgroundColor: const Color(0xFF060D1A),
       body: Stack(
         children: [
-          // ── Sfondo animato ──────────────────────────────────────────────────
           Positioned.fill(child: _AnimatedBackground(controller: _orbitCtrl)),
-
-          // ── Contenuto ───────────────────────────────────────────────────────
           SafeArea(
             child: FadeTransition(
               opacity: _fadeCtrl,
@@ -156,7 +221,6 @@ class _LoginScreenState extends State<LoginScreen>
                     children: [
                       const SizedBox(height: 52),
 
-                      // ── Logo ────────────────────────────────────────────────
                       _LogoSection(controller: _orbitCtrl),
 
                       const SizedBox(height: 44),
@@ -164,9 +228,15 @@ class _LoginScreenState extends State<LoginScreen>
                       // ── LinkedIn ────────────────────────────────────────────
                       _LinkedInButton(
                         loading: _linkedInLoading,
-                        onPressed: (_loading || _linkedInLoading)
-                            ? null
-                            : _loginWithLinkedIn,
+                        onPressed: _anyLoading ? null : _loginWithLinkedIn,
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      // ── Apple ───────────────────────────────────────────────
+                      _AppleButton(
+                        loading: _appleLoading,
+                        onPressed: _anyLoading ? null : _loginWithApple,
                       ),
 
                       const SizedBox(height: 24),
@@ -216,7 +286,6 @@ class _LoginScreenState extends State<LoginScreen>
 
                       const SizedBox(height: 24),
 
-                      // ── Form card ───────────────────────────────────────────
                       _LoginCard(
                         emailCtrl: _emailCtrl,
                         passwordCtrl: _passwordCtrl,
@@ -230,7 +299,6 @@ class _LoginScreenState extends State<LoginScreen>
 
                       const SizedBox(height: 28),
 
-                      // ── Registrazione ───────────────────────────────────────
                       Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -295,7 +363,6 @@ class _BackgroundPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Sfondo base
     final bgPaint = Paint()
       ..shader = LinearGradient(
         begin: Alignment.topCenter,
@@ -307,7 +374,6 @@ class _BackgroundPainter extends CustomPainter {
     final cx = size.width * 0.5;
     final cy = size.height * 0.28;
 
-    // Glow centrale
     final glowPaint = Paint()
       ..shader = RadialGradient(
         colors: [
@@ -320,7 +386,6 @@ class _BackgroundPainter extends CustomPainter {
           center: Offset(cx, cy), radius: size.width * 0.7));
     canvas.drawCircle(Offset(cx, cy), size.width * 0.7, glowPaint);
 
-    // Anelli orbitanti
     final ringData = [
       (0.32, 0.10, 5, 0.0),
       (0.50, 0.06, 7, 0.3),
@@ -335,7 +400,6 @@ class _BackgroundPainter extends CustomPainter {
         ..strokeWidth = 0.5;
       canvas.drawCircle(Offset(cx, cy), r, ringPaint);
 
-      // Nodi sugli anelli
       for (int i = 0; i < nodeCount; i++) {
         final angle = (2 * pi * i / nodeCount) +
             (2 * pi * t * (radiusRatio > 0.5 ? -1 : 1)) +
@@ -493,6 +557,63 @@ class _LinkedInButton extends StatelessWidget {
   }
 }
 
+// ── Apple button ──────────────────────────────────────────────────────────────
+
+class _AppleButton extends StatelessWidget {
+  final bool loading;
+  final VoidCallback? onPressed;
+  const _AppleButton({required this.loading, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        height: 54,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: onPressed != null
+              ? [
+                  BoxShadow(
+                    color: Colors.white.withOpacity(0.15),
+                    blurRadius: 20,
+                    offset: const Offset(0, 6),
+                  ),
+                ]
+              : [],
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (loading)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.black),
+              )
+            else ...[
+              const Icon(Icons.apple, color: Colors.black, size: 22),
+              const SizedBox(width: 10),
+              const Text(
+                'Continua con Apple',
+                style: TextStyle(
+                  color: Colors.black,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.1,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ── Login card ────────────────────────────────────────────────────────────────
 
 class _LoginCard extends StatelessWidget {
@@ -544,7 +665,6 @@ class _LoginCard extends StatelessWidget {
           ),
           const SizedBox(height: 18),
 
-          // Email
           _PremiumField(
             controller: emailCtrl,
             label: 'Email',
@@ -558,7 +678,6 @@ class _LoginCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
 
-          // Password
           _PremiumField(
             controller: passwordCtrl,
             label: 'Password',
@@ -569,7 +688,6 @@ class _LoginCard extends StatelessWidget {
                 (v == null || v.isEmpty) ? 'Inserisci password' : null,
           ),
 
-          // Errore
           if (errorMessage != null) ...[
             const SizedBox(height: 14),
             Container(
@@ -597,7 +715,6 @@ class _LoginCard extends StatelessWidget {
 
           const SizedBox(height: 18),
 
-          // Bottone login
           GestureDetector(
             onTap: loading ? null : onLogin,
             child: Container(
@@ -711,13 +828,11 @@ class _PremiumField extends StatelessWidget {
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:
-              const BorderSide(color: Color(0xFFEF5350), width: 1),
+          borderSide: const BorderSide(color: Color(0xFFEF5350), width: 1),
         ),
         focusedErrorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:
-              const BorderSide(color: Color(0xFFEF5350), width: 1.5),
+          borderSide: const BorderSide(color: Color(0xFFEF5350), width: 1.5),
         ),
         errorStyle: const TextStyle(fontSize: 11),
       ),
