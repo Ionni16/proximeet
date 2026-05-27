@@ -163,10 +163,33 @@ class AuthService {
         nonce: nonce,
       );
 
-      // 2. Crea credenziale OAuth Firebase
+      // 2. Verifica token Apple e crea credenziale OAuth Firebase.
+      // Con firebase_auth 5.x è necessario passare anche authorizationCode
+      // come accessToken, altrimenti Firebase può rispondere con
+      // [firebase_auth/invalid-credential] Invalid OAuth response from apple.com.
+      final identityToken = appleCredential.identityToken;
+      final authorizationCode = appleCredential.authorizationCode;
+
+      if (identityToken == null || identityToken.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-apple-id-token',
+          message: 'Apple non ha restituito identityToken.',
+        );
+      }
+
+      if (authorizationCode.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-apple-authorization-code',
+          message: 'Apple non ha restituito authorizationCode.',
+        );
+      }
+
+      _logAppleTokenClaims(identityToken);
+
       final oauthCredential = OAuthProvider('apple.com').credential(
-        idToken: appleCredential.identityToken,
+        idToken: identityToken,
         rawNonce: rawNonce,
+        accessToken: authorizationCode,
       );
 
       // 3. Login Firebase
@@ -224,6 +247,30 @@ class AuthService {
     final bytes = utf8.encode(input);
     final digest = sha256.convert(bytes);
     return digest.toString();
+  }
+
+
+  /// Logga solo i claim utili del JWT Apple, senza stampare il token completo.
+  void _logAppleTokenClaims(String identityToken) {
+    try {
+      final parts = identityToken.split('.');
+      if (parts.length != 3) return;
+
+      final payload = utf8.decode(
+        base64Url.decode(base64Url.normalize(parts[1])),
+      );
+      final decoded = jsonDecode(payload) as Map<String, dynamic>;
+
+      Log.d(
+        'AUTH',
+        'Apple JWT claims: aud=${decoded['aud']}, '
+        'iss=${decoded['iss']}, '
+        'nonce=${decoded['nonce'] != null ? 'present' : 'missing'}, '
+        'email=${decoded['email'] != null ? 'present' : 'missing'}',
+      );
+    } catch (e) {
+      Log.e('AUTH', 'Impossibile leggere Apple JWT claims', e);
+    }
   }
 
   // ── LINKEDIN LOGIN ──────────────────────────────────────────────────────────
