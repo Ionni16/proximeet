@@ -190,11 +190,11 @@ class _LoginScreenState extends State<LoginScreen>
       if (e.code == AuthorizationErrorCode.canceled) {
         // Utente ha annullato, non mostrare errore
       } else {
-        if (mounted) setState(() => _errorMessage = 'Errore accesso con Apple. Riprova.');
+        if (mounted) setState(() => _errorMessage = e.toString());
       }
     } catch (e) {
       Log.e('LOGIN', 'Errore Apple login', e);
-      if (mounted) setState(() => _errorMessage = 'Errore accesso con Apple. Riprova.');
+      if (mounted) setState(() => _errorMessage = e.toString());
     } finally {
       if (mounted) setState(() => _appleLoading = false);
     }
