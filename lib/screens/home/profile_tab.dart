@@ -48,6 +48,7 @@ class _ProfileContent extends StatefulWidget {
 
 class _ProfileContentState extends State<_ProfileContent> {
   bool _uploadingPhoto = false;
+  bool _deletingAccount = false;
 
   Future<void> _changePhoto() async {
     final file = await StorageService.instance.pickImage();
@@ -75,6 +76,76 @@ class _ProfileContentState extends State<_ProfileContent> {
       }
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
+
+  /// Mostra il dialog di conferma e, se confermato, elimina l'account.
+  Future<void> _confirmAndDeleteAccount() async {
+    final theme = Theme.of(context);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        icon: Icon(Icons.warning_amber_rounded,
+            color: theme.colorScheme.error, size: 32),
+        title: const Text('Eliminare l\'account?'),
+        content: const Text(
+          'Questa azione è permanente e irreversibile.\n\n'
+          'Verranno eliminati definitivamente:\n'
+          '• Il tuo profilo e i tuoi dati\n'
+          '• Tutti i contatti del tuo wallet\n'
+          '• Le tue connessioni con gli altri partecipanti\n\n'
+          'Non sarà possibile recuperare l\'account.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: theme.colorScheme.error,
+              foregroundColor: theme.colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Elimina account'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _deletingAccount = true);
+
+    try {
+      // 1. Esci da un eventuale evento attivo: ferma BLE e ripulisce la presenza.
+      await EventSessionService.instance.leaveEvent();
+
+      // 2. Elimina account + tutti i dati (Cloud Function lato server) e signOut.
+      await AuthService.instance.deleteAccount();
+
+      // 3. Lo StreamBuilder su authStateChanges in main.dart riporta da solo
+      //    alla schermata di login: non serve navigare manualmente.
+      //    Mostriamo comunque una conferma se siamo ancora montati.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Account eliminato')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _deletingAccount = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Impossibile eliminare l\'account. Controlla la connessione e riprova.',
+            ),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
     }
   }
 
@@ -242,12 +313,14 @@ class _ProfileContentState extends State<_ProfileContent> {
             child: OutlinedButton.icon(
               icon: const Icon(Icons.exit_to_app),
               label: const Text('Esci dall\'evento'),
-              onPressed: () async {
-                await EventSessionService.instance.leaveEvent();
-                if (context.mounted) {
-                  Navigator.of(context).popUntil((route) => route.isFirst);
-                }
-              },
+              onPressed: _deletingAccount
+                  ? null
+                  : () async {
+                      await EventSessionService.instance.leaveEvent();
+                      if (context.mounted) {
+                        Navigator.of(context).popUntil((route) => route.isFirst);
+                      }
+                    },
               style: OutlinedButton.styleFrom(
                 foregroundColor: theme.colorScheme.error,
                 side: BorderSide(color: theme.colorScheme.error),
@@ -255,6 +328,56 @@ class _ProfileContentState extends State<_ProfileContent> {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // ── Danger zone: eliminazione account (App Store Guideline 5.1.1v) ──
+          const Divider(),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'GESTIONE ACCOUNT',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: TextButton.icon(
+              icon: _deletingAccount
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.delete_forever_outlined, size: 20),
+              label: Text(
+                _deletingAccount
+                    ? 'Eliminazione in corso…'
+                    : 'Elimina account',
+              ),
+              onPressed: _deletingAccount ? null : _confirmAndDeleteAccount,
+              style: TextButton.styleFrom(
+                foregroundColor: theme.colorScheme.error,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'L\'eliminazione è permanente e rimuove tutti i tuoi dati.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 12,
+              color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: 20),

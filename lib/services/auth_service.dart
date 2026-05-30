@@ -349,6 +349,46 @@ class AuthService {
     await _auth.signOut();
   }
 
+  /// Elimina permanentemente l'account dell'utente e tutti i suoi dati.
+  ///
+  /// Conforme alla App Store Guideline 5.1.1(v): la cancellazione è completa,
+  /// avviata dall'utente e non richiede passaggi esterni.
+  ///
+  /// La logica pesante (dati Firestore, Storage, utente Auth) gira lato server
+  /// nella Cloud Function `deleteAccount`, perché richiede privilegi admin per
+  /// rimuovere l'utente anche dai wallet degli altri partecipanti.
+  /// Dopo la cancellazione facciamo signOut per ripulire lo stato locale:
+  /// lo StreamBuilder su authStateChanges riporterà automaticamente al login.
+  Future<void> deleteAccount() async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) {
+      throw FirebaseAuthException(
+        code: 'no-current-user',
+        message: 'Nessun utente autenticato.',
+      );
+    }
+
+    // Chiama la Cloud Function che elimina tutti i dati lato server e
+    // l'utente Auth. La logica di uscita dall'evento (stop BLE) è gestita
+    // dal chiamante prima di invocare questo metodo.
+    try {
+      await _functions.httpsCallable('deleteAccount').call();
+    } on FirebaseFunctionsException catch (e) {
+      Log.e('AUTH', 'Errore Cloud Function deleteAccount', e);
+      rethrow;
+    }
+
+    // L'utente Auth è già stato eliminato lato server: signOut ripulisce
+    // solo la sessione locale e fa scattare il redirect al login.
+    try {
+      await _auth.signOut();
+    } catch (e) {
+      Log.e('AUTH', 'Errore signOut post-eliminazione', e);
+    }
+
+    Log.d('AUTH', 'Account eliminato e sessione locale ripulita');
+  }
+
   Future<UserModel?> getUserProfile(String uid) async {
     final doc = await _db.collection('users').doc(uid).get();
     if (!doc.exists) return null;

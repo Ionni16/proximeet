@@ -232,6 +232,99 @@ exports.respondCardRequest = onCall(async (request) => {
   return { success: true };
 });
 
+/**
+ * Elimina COMPLETAMENTE l'account dell'utente autenticato e tutti i suoi dati.
+ *
+ * Conforme alla App Store Review Guideline 5.1.1(v): l'eliminazione è avviata
+ * dall'utente dall'interno dell'app, è permanente e rimuove tutti i dati
+ * personali, senza richiedere passaggi esterni (telefonate, email, siti web).
+ *
+ * Usa SEMPRE request.auth.uid (mai un uid passato dal client): un utente può
+ * eliminare solo il proprio account.
+ *
+ * Ordine: prima tutti i dati Firestore/Storage, poi l'utente Auth per ultimo,
+ * così se qualcosa fallisce a metà l'utente può ritentare (l'Auth è ancora vivo).
+ */
+exports.deleteAccount = onCall(async (request) => {
+  const uid = request.auth?.uid;
+  if (!uid) {
+    throw new HttpsError("unauthenticated", "Devi essere autenticato per eliminare l'account.");
+  }
+
+  const db = admin.firestore();
+  const bulkWriter = db.bulkWriter();
+  // Non bloccare l'intera cancellazione per il fallimento di un singolo doc:
+  // ritenta qualche volta, poi prosegui.
+  bulkWriter.onWriteError((error) => {
+    if (error.failedAttempts < 3) return true;
+    console.error(`deleteAccount: doc non eliminato ${error.documentRef.path}:`, error.message);
+    return false;
+  });
+
+  try {
+    // 1. Documento utente principale (contiene profilo, fcmToken, ecc.)
+    await db.collection("users").doc(uid).delete();
+
+    // 2. Wallet dell'utente: connections/{uid} e tutta la sottocollezione contacts
+    await db.recursiveDelete(db.collection("connections").doc(uid), bulkWriter);
+
+    // 3. Rimuovi l'utente dai wallet di TUTTI gli altri (collection group su contacts).
+    //    Ogni contatto salvato ha un campo `uid` = uid del contatto.
+    const inOthersWallets = await db
+      .collectionGroup("contacts")
+      .where("uid", "==", uid)
+      .get();
+    for (const doc of inOthersWallets.docs) {
+      bulkWriter.delete(doc.ref);
+    }
+
+    // 4. Richieste di connessione in cui l'utente è mittente o destinatario.
+    const sent = await db.collection("connectionRequests").where("senderUid", "==", uid).get();
+    const received = await db.collection("connectionRequests").where("receiverUid", "==", uid).get();
+    for (const doc of [...sent.docs, ...received.docs]) {
+      bulkWriter.delete(doc.ref);
+    }
+
+    // 5. Dati legati agli eventi: presence, proximityTokens, detections.
+    const events = await db.collection("events").get();
+    for (const eventDoc of events.docs) {
+      const eventRef = db.collection("events").doc(eventDoc.id);
+
+      // presence/{uid}
+      bulkWriter.delete(eventRef.collection("presence").doc(uid));
+
+      // proximityTokens dove uid == uid (la chiave del doc è il token, non l'uid)
+      const tokens = await eventRef.collection("proximityTokens").where("uid", "==", uid).get();
+      for (const t of tokens.docs) {
+        bulkWriter.delete(t.ref);
+      }
+
+      // detections/{uid} + sottocollezione nearby (le mie rilevazioni)
+      await db.recursiveDelete(eventRef.collection("detections").doc(uid), bulkWriter);
+    }
+
+    await bulkWriter.close();
+
+    // 6. Avatar su Storage (best-effort: potrebbe non esistere).
+    try {
+      await admin.storage().bucket().file(`avatars/${uid}.jpg`).delete();
+    } catch (e) {
+      if (e.code !== 404) {
+        console.warn(`deleteAccount: avatar non eliminato per ${uid}:`, e.message);
+      }
+    }
+
+    // 7. PER ULTIMO: l'utente Firebase Auth.
+    await admin.auth().deleteUser(uid);
+
+    console.log(`deleteAccount: account ${uid} eliminato completamente.`);
+    return { success: true };
+  } catch (e) {
+    console.error(`deleteAccount: errore eliminazione account ${uid}:`, e);
+    throw new HttpsError("internal", "Impossibile completare l'eliminazione dell'account. Riprova.");
+  }
+});
+
 exports.cleanupOldDetections = onSchedule("every 60 minutes", async () => {
   const db = admin.firestore();
   const tenMinutesAgo = admin.firestore.Timestamp.fromDate(new Date(Date.now() - 10 * 60 * 1000));
