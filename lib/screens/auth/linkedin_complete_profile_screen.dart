@@ -71,10 +71,18 @@ class _LinkedInCompleteProfileScreenState
 
     _photoUrl = (p['photoURL'] as String? ?? '').trim();
 
-    _companyCtrl = TextEditingController();
-    _roleCtrl    = TextEditingController();
-    _bioCtrl     = TextEditingController();
-    _phoneCtrl   = TextEditingController();
+    _companyCtrl = TextEditingController(
+      text: (p['company'] as String? ?? '').trim(),
+    );
+    _roleCtrl = TextEditingController(
+      text: (p['role'] as String? ?? '').trim(),
+    );
+    _bioCtrl = TextEditingController(
+      text: (p['bio'] as String? ?? '').trim(),
+    );
+    _phoneCtrl = TextEditingController(
+      text: (p['phone'] as String? ?? '').trim(),
+    );
   }
 
   @override
@@ -99,14 +107,8 @@ class _LinkedInCompleteProfileScreenState
   }
 
   Future<void> _saveProfile() async {
-    if (!_hasPhoto) {
-      setState(() {
-        _photoError = true;
-        _errorMessage = 'La foto profilo è obbligatoria';
-      });
-      return;
-    }
-
+    // La foto resta consigliata, ma non blocca l'utente Apple/App Review.
+    // I dati minimi obbligatori sono nome, cognome, email, azienda e ruolo.
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {

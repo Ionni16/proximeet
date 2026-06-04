@@ -6,7 +6,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'firebase_options.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/splash_screen.dart';
-import 'screens/events/event_list_screen.dart';
+import 'screens/auth/profile_gate_screen.dart';
 import 'services/event_session_service.dart';
 
 void main() async {
@@ -281,7 +281,7 @@ class _AppEntryState extends State<_AppEntry> {
             );
           }
           final dest = snapshot.hasData
-              ? const EventListScreen()
+              ? const ProfileGateScreen()
               : const LoginScreen();
           return SplashScreen(
             destination: dest,
@@ -297,7 +297,7 @@ class _AppEntryState extends State<_AppEntry> {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const _SplashLoader();
         }
-        if (snapshot.hasData) return const EventListScreen();
+        if (snapshot.hasData) return const ProfileGateScreen();
         return const LoginScreen();
       },
     );

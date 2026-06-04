@@ -4,6 +4,7 @@ import 'dart:math' show sin, cos, pi;
 import 'package:flutter/material.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import '../../services/auth_service.dart';
+import '../../models/user_model.dart';
 import '../../core/logger.dart';
 import 'register_screen.dart';
 import 'linkedin_webview_screen.dart';
@@ -56,6 +57,43 @@ class _LoginScreenState extends State<LoginScreen>
 
   bool get _anyLoading => _loading || _linkedInLoading || _appleLoading;
 
+  bool _profileNeedsCompletion(UserModel? profile, String authUid) {
+    if (profile == null) return true;
+    return profile.uid.trim().isEmpty ||
+        profile.uid.trim() != authUid ||
+        profile.firstName.trim().isEmpty ||
+        profile.lastName.trim().isEmpty ||
+        profile.email.trim().isEmpty ||
+        profile.company.trim().isEmpty ||
+        profile.role.trim().isEmpty;
+  }
+
+  Map<String, dynamic> _completionPayload({
+    required String provider,
+    UserModel? profile,
+    Map<String, dynamic>? fallback,
+  }) {
+    return {
+      'firstName': profile?.firstName.trim().isNotEmpty == true
+          ? profile!.firstName
+          : (fallback?['firstName'] ?? '').toString(),
+      'lastName': profile?.lastName.trim().isNotEmpty == true
+          ? profile!.lastName
+          : (fallback?['lastName'] ?? '').toString(),
+      'email': profile?.email.trim().isNotEmpty == true
+          ? profile!.email
+          : (fallback?['email'] ?? '').toString(),
+      'company': profile?.company ?? '',
+      'role': profile?.role ?? '',
+      'bio': profile?.bio ?? '',
+      'phone': profile?.phone ?? '',
+      'photoURL': profile?.avatarURL.trim().isNotEmpty == true
+          ? profile!.avatarURL
+          : (fallback?['photoURL'] ?? '').toString(),
+      'loginProvider': provider,
+    };
+  }
+
   // ── Auth ─────────────────────────────────────────────────────────────────────
 
   Future<void> _login() async {
@@ -103,17 +141,19 @@ class _LoginScreenState extends State<LoginScreen>
       if (!mounted) return;
       final uid = _authService.currentUser?.uid;
       if (uid != null) {
+        await _authService.ensureCurrentUserProfileShell();
         final existingProfile = await _authService.getUserProfile(uid);
-        final needsCompletion = existingProfile == null ||
-            existingProfile.uid.isEmpty ||
-            existingProfile.company.isEmpty ||
-            existingProfile.role.isEmpty;
+        final needsCompletion = _profileNeedsCompletion(existingProfile, uid);
         if (!mounted) return;
         if (needsCompletion) {
           await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => LinkedInCompleteProfileScreen(
-                linkedInProfile: {...signInResult.linkedInProfile, 'loginProvider': 'linkedin'},
+                linkedInProfile: _completionPayload(
+                  provider: 'linkedin',
+                  profile: existingProfile,
+                  fallback: signInResult.linkedInProfile,
+                ),
               ),
             ),
           );
@@ -160,22 +200,24 @@ class _LoginScreenState extends State<LoginScreen>
       if (!mounted) return;
       final uid = _authService.currentUser?.uid;
       if (uid != null) {
+        await _authService.ensureCurrentUserProfileShell();
         final existingProfile = await _authService.getUserProfile(uid);
-        final needsCompletion = existingProfile == null ||
-            existingProfile.company.isEmpty ||
-            existingProfile.role.isEmpty;
+        final needsCompletion = _profileNeedsCompletion(existingProfile, uid);
         if (!mounted) return;
         if (needsCompletion) {
           await Navigator.of(context).push(
             MaterialPageRoute(
               builder: (_) => LinkedInCompleteProfileScreen(
-                linkedInProfile: {
-                  'firstName': result.firstName ?? '',
-                  'lastName': result.lastName ?? '',
-                  'email': result.email ?? '',
-                  'photoURL': '',
-                  'loginProvider': 'apple',
-                },
+                linkedInProfile: _completionPayload(
+                  provider: 'apple',
+                  profile: existingProfile,
+                  fallback: {
+                    'firstName': result.firstName ?? '',
+                    'lastName': result.lastName ?? '',
+                    'email': result.email ?? '',
+                    'photoURL': '',
+                  },
+                ),
               ),
             ),
           );

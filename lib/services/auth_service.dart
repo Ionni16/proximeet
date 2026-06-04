@@ -207,16 +207,23 @@ class AuthService {
       final firstName = appleCredential.givenName;
       final lastName = appleCredential.familyName;
 
-      // 5. Se nuovo utente e abbiamo dati minimi, salviamo subito email
-      if (isNewUser && email != null) {
-        await _db.collection('users').doc(uid).set({
-          'email': email.trim().toLowerCase(),
+      // 5. Crea/ripara sempre il documento users/{uid}.
+      // Apple può non restituire nome/email dopo il primo login, quindi il profilo
+      // deve esistere comunque e deve sempre contenere uid.
+      await _db.collection('users').doc(uid).set({
+        'uid': uid,
+        if ((email ?? '').trim().isNotEmpty)
+          'email': email!.trim().toLowerCase(),
+        if (isNewUser || (firstName ?? '').trim().isNotEmpty)
           'firstName': firstName?.trim() ?? '',
+        if (isNewUser || (lastName ?? '').trim().isNotEmpty)
           'lastName': lastName?.trim() ?? '',
-          'avatarURL': firebaseUser.photoURL ?? '',
-          'createdAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true));
-      }
+        if ((firebaseUser.photoURL ?? '').trim().isNotEmpty)
+          'avatarURL': firebaseUser.photoURL!.trim(),
+        'loginProvider': 'apple',
+        'updatedAt': FieldValue.serverTimestamp(),
+        if (isNewUser) 'createdAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
       Log.d('AUTH', 'Apple login OK - uid: $uid, newUser: $isNewUser');
 
@@ -396,7 +403,34 @@ class AuthService {
     final data = doc.data();
     if (data == null) return null;
 
-    return UserModel.fromMap(data);
+    // Fallback fondamentale: alcuni profili vecchi o creati da Apple
+    // possono non avere il campo uid, ma il doc ID è già l'UID Firebase.
+    return UserModel.fromMap({
+      ...data,
+      'uid': (data['uid'] ?? uid).toString(),
+    });
+  }
+
+  Future<void> ensureCurrentUserProfileShell() async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+
+    final uid = user.uid;
+    final provider = user.providerData.any((p) => p.providerId == 'apple.com')
+        ? 'apple'
+        : user.providerData.isNotEmpty
+            ? user.providerData.first.providerId
+            : 'unknown';
+
+    await _db.collection('users').doc(uid).set({
+      'uid': uid,
+      if ((user.email ?? '').trim().isNotEmpty)
+        'email': user.email!.trim().toLowerCase(),
+      if ((user.photoURL ?? '').trim().isNotEmpty)
+        'avatarURL': user.photoURL!.trim(),
+      'loginProvider': provider,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
   }
 
   Future<void> updateAvatar(String uid, String avatarURL) async {
