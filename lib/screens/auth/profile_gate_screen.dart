@@ -1,6 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../../core/logger.dart';
 import '../../models/user_model.dart';
 import '../../services/auth_service.dart';
 import '../events/event_list_screen.dart';
@@ -37,6 +38,12 @@ class _ProfileGateScreenState extends State<ProfileGateScreen> {
     // Crea/ripara subito il documento users/{uid}. Serve soprattutto per Apple,
     // perché Apple può non restituire nome/email dopo il primo login.
     await AuthService.instance.ensureCurrentUserProfileShell();
+
+    // Salva il token FCM appena l'utente è autenticato (best-effort:
+    // un fallimento qui non deve bloccare la navigazione).
+    AuthService.instance.saveFcmToken().catchError((Object e) {
+      Log.w('PROFILE-GATE', 'Salvataggio token FCM fallito: $e');
+    });
 
     final profile = await AuthService.instance.getUserProfile(uid);
 
@@ -76,7 +83,10 @@ class _ProfileGateScreenState extends State<ProfileGateScreen> {
 
   Map<String, dynamic> _profilePayload(UserModel? profile, User firebaseUser) {
     final displayName = (firebaseUser.displayName ?? '').trim();
-    final parts = displayName.split(RegExp(r'\\s+')).where((e) => e.isNotEmpty).toList();
+    // FIX: la regex era r'\\s+' (backslash letterale + s) e non splittava
+    // mai sul whitespace: nome e cognome finivano entrambi in firstName.
+    final parts =
+        displayName.split(RegExp(r'\s+')).where((e) => e.isNotEmpty).toList();
 
     return {
       'firstName': profile?.firstName.trim().isNotEmpty == true
@@ -95,9 +105,10 @@ class _ProfileGateScreenState extends State<ProfileGateScreen> {
       'photoURL': profile?.avatarURL.trim().isNotEmpty == true
           ? profile!.avatarURL
           : (firebaseUser.photoURL ?? ''),
-      'loginProvider': firebaseUser.providerData.any((p) => p.providerId == 'apple.com')
-          ? 'apple'
-          : 'linkedin',
+      'loginProvider':
+          firebaseUser.providerData.any((p) => p.providerId == 'apple.com')
+              ? 'apple'
+              : 'linkedin',
     };
   }
 

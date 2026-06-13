@@ -1,3 +1,5 @@
+import '../core/parsing.dart';
+
 class ConnectionRequest {
   final String id;
   final String senderUid;
@@ -26,15 +28,17 @@ class ConnectionRequest {
   factory ConnectionRequest.fromMap(String id, Map<String, dynamic> map) {
     return ConnectionRequest(
       id: id,
-      senderUid: (map['senderUid'] ?? '').toString(),
-      receiverUid: (map['receiverUid'] ?? '').toString(),
-      eventId: (map['eventId'] ?? '').toString(),
-      status: (map['status'] ?? 'pending').toString(),
-      createdAt: map['createdAt']?.toDate(),
-      senderDisplayName: (map['senderDisplayName'] ?? '').toString().trim(),
-      senderRole: (map['senderRole'] ?? '').toString().trim(),
-      senderCompany: (map['senderCompany'] ?? '').toString().trim(),
-      senderAvatarURL: (map['senderAvatarURL'] ?? '').toString().trim(),
+      senderUid: parseString(map['senderUid']),
+      receiverUid: parseString(map['receiverUid']),
+      eventId: parseString(map['eventId']),
+      status: parseString(map['status']).isEmpty
+          ? 'pending'
+          : parseString(map['status']),
+      createdAt: parseDateTime(map['createdAt']),
+      senderDisplayName: parseString(map['senderDisplayName']),
+      senderRole: parseString(map['senderRole']),
+      senderCompany: parseString(map['senderCompany']),
+      senderAvatarURL: parseString(map['senderAvatarURL']),
     );
   }
 }
@@ -65,7 +69,7 @@ class WalletContact {
     required this.avatarURL,
     this.connectedAt,
     this.eventName = '',
-    required this.note,
+    this.note = '',
   });
 
   String get fullName {
@@ -75,31 +79,35 @@ class WalletContact {
 
   factory WalletContact.fromMap(Map<String, dynamic> map) {
     return WalletContact(
-      uid: (map['uid'] ?? '').toString(),
-      firstName: (map['firstName'] ?? '').toString(),
-      lastName: (map['lastName'] ?? '').toString(),
-      company: (map['company'] ?? '').toString(),
-      role: (map['role'] ?? '').toString(),
-      email: (map['email'] ?? '').toString(),
-      phone: (map['phone'] ?? '').toString(),
-      linkedin: (map['linkedin'] ?? '').toString(),
+      uid: parseString(map['uid']),
+      firstName: parseString(map['firstName']),
+      lastName: parseString(map['lastName']),
+      company: parseString(map['company']),
+      role: parseString(map['role']),
+      email: parseString(map['email']),
+      phone: parseString(map['phone']),
+      linkedin: parseString(map['linkedin']),
 
-      // L'URL dell'avatar può avere nomi diversi nei vecchi documenti Firestore, proviamo tutti.
-      avatarURL: (map['avatarURL'] ??
-              map['avatarUrl'] ??
-              map['photoURL'] ??
-              map['photoUrl'] ??
-              map['avatar'] ??
-              '')
-          .toString()
-          .trim(),
+      // Retro-compatibilità: i vecchi documenti possono avere l'avatar
+      // sotto chiavi diverse. In lettura le accettiamo tutte; in scrittura
+      // (toMap) usiamo solo avatarURL.
+      avatarURL: parseString(
+        map['avatarURL'] ??
+            map['avatarUrl'] ??
+            map['photoURL'] ??
+            map['photoUrl'] ??
+            map['avatar'],
+      ),
 
-      connectedAt: map['connectedAt']?.toDate(),
-      eventName: (map['eventName'] ?? '').toString(),
-      note: (map['note'] ?? '').toString(),
+      connectedAt: parseDateTime(map['connectedAt']),
+      eventName: parseString(map['eventName']),
+      note: parseString(map['note']),
     );
   }
 
+  /// Serializzazione canonica: una sola chiave per l'avatar (`avatarURL`).
+  /// Le scritture nel wallet avvengono comunque server-side; questo
+  /// metodo resta per completezza e per eventuali usi locali/test.
   Map<String, dynamic> toMap() {
     return {
       'uid': uid,
@@ -111,8 +119,6 @@ class WalletContact {
       'phone': phone,
       'linkedin': linkedin,
       'avatarURL': avatarURL,
-      'avatarUrl': avatarURL,
-      'photoURL': avatarURL,
       'eventName': eventName,
       'note': note,
     };

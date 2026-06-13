@@ -1,0 +1,174 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ProxiMeet — Firestore Security Rules
+//
+// Principio: ogni utente scrive SOLO nei propri documenti. Tutte le scritture
+// cross-utente (wallet, richieste di contatto) passano dalle Cloud Functions,
+// che usano l'Admin SDK e quindi bypassano queste regole.
+//
+// Mappa dei permessi:
+//   users/{uid}                                  R: autenticati  W: solo owner
+//   events/{eventId}                             R: autenticati  W: nessuno (console/admin)
+//   events/{e}/presence/{uid}                    R: autenticati  W: solo owner
+//   events/{e}/proximityTokens/{token}           R: autenticati  W: solo owner del token
+//   events/{e}/detections/{owner}/nearby/{t}     R/W: solo owner
+//   connectionRequests/{id}                      R: mittente o destinatario  W: solo CF
+//   connections/{owner}/contacts/{c}             R: solo owner  W: solo CF
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper ──────────────────────────────────────────────────────────────
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Chiavi cambiate da questa scrittura (per gli update).
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Campi ammessi sul documento profilo utente.
+    function userFields() {
+      return ['uid', 'firstName', 'lastName', 'email', 'company', 'role',
+              'avatarURL', 'linkedin', 'github', 'twitter', 'phone', 'bio',
+              'createdAt', 'updatedAt', 'loginProvider',
+              'fcmToken', 'fcmTokenUpdatedAt'];
+    }
+
+    // Campi ammessi sul documento presenza in evento.
+    function presenceFields() {
+      return ['uid', 'sessionBleId', 'proximityToken', 'transport',
+              'displayName', 'avatarURL', 'company', 'role', 'bio',
+              'joinedAt', 'lastSeen', 'isActive', 'leftAt'];
+    }
+
+    // Campi ammessi sul documento proximity token BLE.
+    function tokenFields() {
+      return ['uid', 'displayName', 'company', 'role', 'avatarURL', 'bio',
+              'sessionBleId', 'token', 'transport',
+              'serviceUuid', 'characteristicUuid',
+              'createdAt', 'updatedAt', 'expiresAt', 'active', 'leftAt'];
+    }
+
+    // ── users/{uid} ─────────────────────────────────────────────────────────
+    // I profili sono leggibili da ogni utente autenticato: servono per la
+    // lista nearby, le richieste in arrivo e la pagina profilo dei contatti.
+
+    match /users/{uid} {
+      allow read: if signedIn();
+
+      allow create: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.keys().hasOnly(userFields());
+
+      // L'uid non può cambiare; createdAt è immutabile una volta scritto.
+      allow update: if isOwner(uid)
+        && request.resource.data.uid == uid
+        && request.resource.data.keys().hasOnly(userFields())
+        && !('uid' in changedKeys())
+        && (!('createdAt' in resource.data) || !('createdAt' in changedKeys()));
+
+      // L'eliminazione passa SOLO dalla Cloud Function deleteAccount,
+      // che rimuove anche wallet, presenze, token e l'utente Auth.
+      allow delete: if false;
+    }
+
+    // ── events/{eventId} ────────────────────────────────────────────────────
+    // Gli eventi vengono creati e gestiti fuori dall'app (console / admin).
+
+    match /events/{eventId} {
+      allow read: if signedIn();
+      allow write: if false;
+
+      // ── presence/{uid}: "sono qui adesso" ─────────────────────────────────
+      match /presence/{uid} {
+        allow read: if signedIn();
+
+        allow create: if isOwner(uid)
+          && request.resource.data.uid == uid
+          && request.resource.data.keys().hasOnly(presenceFields());
+
+        allow update: if isOwner(uid)
+          && request.resource.data.uid == uid
+          && request.resource.data.keys().hasOnly(presenceFields());
+
+        // Lo stale viene marcato inattivo da cleanupStalePresence (CF).
+        allow delete: if false;
+      }
+
+      // ── proximityTokens/{token}: mapping token BLE → profilo ─────────────
+      match /proximityTokens/{token} {
+        allow read: if signedIn();
+
+        allow create: if signedIn()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.token == token
+          && request.resource.data.keys().hasOnly(tokenFields());
+
+        // Solo il proprietario del token può aggiornarlo (heartbeat, leave),
+        // e non può riassegnarlo a un altro uid.
+        allow update: if signedIn()
+          && resource.data.uid == request.auth.uid
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.keys().hasOnly(tokenFields());
+
+        // I token scaduti li elimina cleanupExpiredProximityTokens (CF).
+        allow delete: if false;
+      }
+
+      // ── detections/{owner}/nearby/{target}: chi HO rilevato io ────────────
+      // Dati privati del rilevatore. La CF sendConnectionRequest li legge con
+      // privilegi admin per il gating di prossimità.
+      match /detections/{ownerUid}/nearby/{targetUid} {
+        allow read: if isOwner(ownerUid);
+
+        allow create, update: if isOwner(ownerUid)
+          && request.resource.data.keys().hasOnly(['rssi', 'lastSeen'])
+          && request.resource.data.rssi is int
+          && request.resource.data.rssi >= -127
+          && request.resource.data.rssi <= 0
+          // lastSeen deve essere FieldValue.serverTimestamp():
+          // niente timestamp futuri o passati scelti dal client.
+          && request.resource.data.lastSeen == request.time;
+
+        allow delete: if isOwner(ownerUid);
+      }
+    }
+
+    // ── connectionRequests/{id} ─────────────────────────────────────────────
+    // Lettura: solo le due parti coinvolte. Scrittura: SOLO Cloud Functions
+    // (sendConnectionRequest / respondConnectionRequest), che verificano
+    // prossimità, presenza all'evento e identità del rispondente.
+
+    match /connectionRequests/{requestId} {
+      allow read: if signedIn()
+        && (request.auth.uid == resource.data.senderUid
+            || request.auth.uid == resource.data.receiverUid);
+      allow write: if false;
+    }
+
+    // ── connections/{owner}/contacts/{contact} ──────────────────────────────
+    // Il wallet è privato del proprietario. Le scritture avvengono solo via
+    // CF: respondConnectionRequest (creazione contatti), syncProfileToWallets
+    // (propagazione modifiche profilo), deleteAccount (rimozione).
+
+    match /connections/{ownerUid}/contacts/{contactUid} {
+      allow read: if isOwner(ownerUid);
+      allow write: if false;
+    }
+
+    // ── Default: tutto il resto è negato ────────────────────────────────────
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

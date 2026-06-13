@@ -1,9 +1,23 @@
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+/// Gestione dei permessi BLE, con la consapevolezza che su Android i
+/// permessi cambiano radicalmente tra le versioni:
+///
+///   • Android ≤ 11 (API ≤ 30): il BLE scan richiede ACCESS_FINE_LOCATION;
+///     i permessi runtime BLUETOOTH_SCAN/ADVERTISE/CONNECT NON esistono.
+///   • Android 12+ (API ≥ 31): servono BLUETOOTH_SCAN/ADVERTISE/CONNECT;
+///     la posizione NON serve (usiamo neverForLocation nel manifest).
+///   • Android 13+ (API ≥ 33): per le notifiche serve POST_NOTIFICATIONS.
+///
+/// Il vecchio codice trattava "permesso non richiedibile su Android ≤11"
+/// e "permesso negato su 12+" allo stesso modo, restituendo true anche
+/// quando un permesso necessario era stato negato. Qui distinguiamo i
+/// casi in base a sdkInt, così lo stato riportato è veritiero.
 class BlePermissionsService {
   BlePermissionsService._();
 
@@ -12,11 +26,25 @@ class BlePermissionsService {
   // Alias per chi usa .instance invece di .shared.
   static BlePermissionsService get instance => shared;
 
+  static const _tag = 'BLE-PERM';
+
+  // Cache della versione Android per non interrogare il device ogni volta.
+  int? _androidSdkInt;
+
+  /// API level di Android (es. 31 = Android 12). 0 se non Android.
+  Future<int> _sdkInt() async {
+    if (!Platform.isAndroid) return 0;
+    if (_androidSdkInt != null) return _androidSdkInt!;
+    final info = await DeviceInfoPlugin().androidInfo;
+    _androidSdkInt = info.version.sdkInt;
+    return _androidSdkInt!;
+  }
+
   Future<bool> isBluetoothOn() async {
     if (kIsWeb) return false;
 
-    // Su iOS non blocchiamo il join su questo check.
-    // Il permesso Bluetooth lo chiede direttamente il plugin Swift quando serve.
+    // Su iOS non blocchiamo il join su questo check:
+    // il permesso Bluetooth lo chiede CoreBluetooth quando serve.
     if (Platform.isIOS) return true;
 
     try {
@@ -31,109 +59,109 @@ class BlePermissionsService {
 
   Future<void> turnOnBluetooth() async {
     if (!Platform.isAndroid) return;
-
     try {
       await FlutterBluePlus.turnOn();
     } catch (e) {
-      debugPrint('[BLE-PERM] Errore turnOn Bluetooth: $e');
+      debugPrint('[$_tag] Errore turnOn Bluetooth: $e');
     }
   }
 
+  /// Richiede tutti i permessi necessari per la piattaforma/versione.
+  /// Ritorna true se i permessi NECESSARI sono concessi.
   Future<bool> requestAllPermissions() async {
     if (kIsWeb) return false;
-
-    if (Platform.isIOS) {
-      return _requestIOS();
-    }
-
-    if (Platform.isAndroid) {
-      return _requestAndroid();
-    }
-
+    if (Platform.isIOS) return _requestIOS();
+    if (Platform.isAndroid) return _requestAndroid();
     return false;
   }
 
   Future<bool> _requestIOS() async {
-    // iOS: non blocchiamo sull'autorizzazione BT, la gestisce CoreBluetooth.
-    // Chiediamo solo la Location perché serve per il ranging iBeacon.
+    // iOS: non blocchiamo sull'autorizzazione BT (la gestisce CoreBluetooth).
+    // Chiediamo la Location perché serve al ranging iBeacon, ma anche senza
+    // si può entrare nell'evento perché il BLE GATT funziona comunque.
     try {
-      var locationStatus = await Permission.locationWhenInUse.status;
-
-      if (locationStatus.isDenied || locationStatus.isRestricted) {
-        locationStatus = await Permission.locationWhenInUse.request();
+      var status = await Permission.locationWhenInUse.status;
+      if (status.isDenied || status.isRestricted) {
+        status = await Permission.locationWhenInUse.request();
       }
-
-      if (locationStatus.isPermanentlyDenied) {
-        debugPrint('[BLE-PERM] iOS location permanentemente negata. Join consentito comunque.');
-      } else {
-        debugPrint('[BLE-PERM] iOS location status: $locationStatus');
-      }
-
-      // Torniamo sempre true su iOS: anche senza Location si può entrare
-      // nell'evento perché BLE GATT funziona comunque.
+      debugPrint('[$_tag] iOS location status: $status');
+      await _requestNotifications();
       return true;
     } catch (e) {
-      debugPrint('[BLE-PERM] iOS errore richiesta permessi: $e');
+      debugPrint('[$_tag] iOS errore richiesta permessi: $e');
       return true;
     }
   }
 
   Future<bool> _requestAndroid() async {
     try {
-      // Su Android i permessi BLE cambiano tra versione 11 e 12+.
-      // Chiediamo tutto, ma non blocchiamo il join se qualcosa manca:
-      // su Android 11 i permessi BT runtime non esistono.
-      final locationStatus = await Permission.locationWhenInUse.request();
-      final scanStatus = await Permission.bluetoothScan.request();
-      final advertiseStatus = await Permission.bluetoothAdvertise.request();
-      final connectStatus = await Permission.bluetoothConnect.request();
+      await _requestNotifications();
 
-      final locationOk = locationStatus.isGranted;
+      final sdkInt = await _sdkInt();
 
-      // Su Android 12+ scan/advertise/connect devono essere tutti granted.
-      // Su Android 11 possono risultare denied ma non è un problema:
-      // il plugin nativo fa il check finale e usa solo Fine Location.
-      final android12PermsOk =
-          scanStatus.isGranted && advertiseStatus.isGranted && connectStatus.isGranted;
+      if (sdkInt >= 31) {
+        // Android 12+: contano SOLO scan/advertise/connect. La posizione
+        // non serve (neverForLocation), quindi non la richiediamo.
+        final results = await [
+          Permission.bluetoothScan,
+          Permission.bluetoothAdvertise,
+          Permission.bluetoothConnect,
+        ].request();
 
-      final ok = locationOk && (android12PermsOk ||
-          scanStatus.isDenied || advertiseStatus.isDenied || connectStatus.isDenied);
+        final granted = results.values.every((s) => s.isGranted);
+        debugPrint('[$_tag] Android $sdkInt BT perms: $results -> $granted');
+        return granted;
+      }
 
-      debugPrint(
-        '[BLE-PERM] Android permissions: '
-        'location=$locationStatus scan=$scanStatus '
-        'advertise=$advertiseStatus connect=$connectStatus -> $ok',
-      );
-
-      return ok;
+      // Android ≤ 11: il BLE scan dipende da ACCESS_FINE_LOCATION.
+      // I permessi BT runtime non esistono qui.
+      final status = await Permission.locationWhenInUse.request();
+      final granted = status.isGranted;
+      debugPrint('[$_tag] Android $sdkInt location: $status -> $granted');
+      return granted;
     } catch (e) {
-      debugPrint('[BLE-PERM] Android errore richiesta permessi: $e');
+      debugPrint('[$_tag] Android errore richiesta permessi: $e');
       return false;
     }
   }
 
+  /// POST_NOTIFICATIONS (Android 13+) / autorizzazione notifiche iOS.
+  /// Best-effort: il suo esito non incide sul join all'evento.
+  Future<void> _requestNotifications() async {
+    try {
+      if (Platform.isAndroid) {
+        final sdkInt = await _sdkInt();
+        if (sdkInt < 33) return; // prima di Android 13 non esiste il permesso
+      }
+      final status = await Permission.notification.status;
+      if (status.isDenied) {
+        await Permission.notification.request();
+      }
+    } catch (e) {
+      debugPrint('[$_tag] Errore richiesta permesso notifiche: $e');
+    }
+  }
+
+  /// Verifica (senza richiedere) se i permessi NECESSARI sono concessi.
   Future<bool> arePermissionsGranted() async {
     if (kIsWeb) return false;
 
-    if (Platform.isIOS) {
-      // Su iOS saltiamo il check e lasciamo sempre passare.
-      return true;
-    }
+    // iOS: lasciamo sempre passare, la gestione è di CoreBluetooth.
+    if (Platform.isIOS) return true;
 
     if (Platform.isAndroid) {
-      final location = await Permission.locationWhenInUse.isGranted;
-      if (!location) return false;
+      final sdkInt = await _sdkInt();
 
-      final scan = await Permission.bluetoothScan.status;
-      final advertise = await Permission.bluetoothAdvertise.status;
-      final connect = await Permission.bluetoothConnect.status;
+      if (sdkInt >= 31) {
+        // Android 12+: tutti e tre i permessi BT devono essere concessi.
+        final scan = await Permission.bluetoothScan.isGranted;
+        final advertise = await Permission.bluetoothAdvertise.isGranted;
+        final connect = await Permission.bluetoothConnect.isGranted;
+        return scan && advertise && connect;
+      }
 
-      // Android 12+: se tutti e tre i permessi BT sono ok siamo a posto.
-      if (scan.isGranted && advertise.isGranted && connect.isGranted) return true;
-
-      // Android 11 e precedenti: basta la Location.
-      // I permessi BT runtime non esistono qui, ci pensa il plugin Kotlin.
-      return true;
+      // Android ≤ 11: basta la Location.
+      return Permission.locationWhenInUse.isGranted;
     }
 
     return false;

@@ -54,7 +54,13 @@ class EventSessionService {
       await _writeProximityToken(eventId: eventId, user: user, token: token);
       await _writePresence(eventId: eventId, uid: uid, user: user, token: token);
 
-      PresenceHeartbeatService.instance.start(eventId: eventId, uid: uid);
+      // Passiamo il token all'heartbeat: a ogni battito ne rinnoverà la
+      // scadenza (expiresAt), così il cleanup non lo elimina mentre siamo attivi.
+      PresenceHeartbeatService.instance.start(
+        eventId: eventId,
+        uid: uid,
+        proximityToken: token,
+      );
       _isInEvent = true;
 
       // NearbyDetectionService deve essere in ascolto prima che parta il plugin nativo,

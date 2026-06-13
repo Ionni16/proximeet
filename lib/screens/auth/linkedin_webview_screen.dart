@@ -1,7 +1,12 @@
 // lib/screens/auth/linkedin_webview_screen.dart
 //
 // Schermata WebView che gestisce il flusso OAuth di LinkedIn.
-// Intercetta il redirect URI e restituisce il codice autorizzativo.
+// Intercetta il redirect URI, VERIFICA lo `state` anti-CSRF e
+// restituisce il codice autorizzativo.
+//
+// Sicurezza: lo `state` viene generato qui con Random.secure() e
+// confrontato con quello restituito da LinkedIn nel callback. Se non
+// coincidono il flusso è scartato (possibile tentativo CSRF / replay).
 //
 // FIX ANDROID: su Android, WebView NON chiama onNavigationRequest per i
 // redirect HTTP 302 lato server (limitazione di shouldOverrideUrlLoading).
@@ -14,8 +19,11 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../core/linkedin_config.dart';
+import '../../core/logger.dart';
 
 /// Risultato del flusso OAuth LinkedIn.
+/// Lo `state` è già stato verificato: chi riceve questo oggetto
+/// può usare direttamente `code`.
 class LinkedInAuthCode {
   final String code;
   final String state;
@@ -30,22 +38,31 @@ class LinkedInWebViewScreen extends StatefulWidget {
 }
 
 class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
+  static const _tag = 'LINKEDIN-OAUTH';
+
   late final WebViewController _controller;
+
+  /// State anti-CSRF generato per QUESTA sessione di login.
+  late final String _expectedState;
+
   bool _loading = true;
-  bool _handled = false; // evita callback doppi (es. onPageStarted + onNavigationRequest)
+  bool _handled = false; // evita callback doppi (onPageStarted + onNavigationRequest)
 
   @override
   void initState() {
     super.initState();
+
+    _expectedState = LinkedInConfig.generateState();
 
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (url) {
-            // ── FIX ANDROID ──────────────────────────────────────────────────
-            // Su Android i redirect HTTP 302 non passano per onNavigationRequest.
-            // onPageStarted invece scatta sempre, quindi intercettiamo qui.
+            // ── FIX ANDROID ──────────────────────────────────────────────
+            // Su Android i redirect HTTP 302 non passano per
+            // onNavigationRequest. onPageStarted invece scatta sempre,
+            // quindi intercettiamo qui.
             if (url.startsWith(LinkedInConfig.redirectUri)) {
               _processCallbackUrl(url);
               return;
@@ -55,7 +72,8 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
           onPageFinished: (_) => setState(() => _loading = false),
           onWebResourceError: (error) {
             // Se il redirect è già stato gestito, ignoriamo gli errori
-            // del caricamento della pagina linkedin-callback (che può non esistere).
+            // del caricamento della pagina linkedin-callback (che può
+            // non esistere come pagina reale).
             if (_handled) return;
             if (error.errorType == WebResourceErrorType.hostLookup ||
                 error.errorType == WebResourceErrorType.connect) {
@@ -63,20 +81,21 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
             }
           },
           onNavigationRequest: (request) {
-            // ── iOS / user-initiated navigation ──────────────────────────────
-            // Su iOS questo scatta anche per i redirect. Su Android solo per
-            // navigazioni avviate dall'utente o da JavaScript.
+            // ── iOS / user-initiated navigation ──────────────────────────
+            // Su iOS questo scatta anche per i redirect. Su Android solo
+            // per navigazioni avviate dall'utente o da JavaScript.
             return _handleNavigationRequest(request.url);
           },
         ),
       )
-      ..loadRequest(Uri.parse(LinkedInConfig.authorizationUrl));
+      ..loadRequest(Uri.parse(LinkedInConfig.authorizationUrl(_expectedState)));
   }
 
-  // ── Logica comune ────────────────────────────────────────────────────────────
+  // ── Logica comune ────────────────────────────────────────────────────
 
-  /// Estrae il codice OAuth dall'URL di callback e chiude il WebView.
-  /// Chiamato sia da onPageStarted che da onNavigationRequest.
+  /// Estrae il codice OAuth dall'URL di callback, verifica lo `state`
+  /// e chiude il WebView. Chiamato sia da onPageStarted che da
+  /// onNavigationRequest.
   void _processCallbackUrl(String url) {
     if (_handled) return;
     _handled = true;
@@ -89,12 +108,22 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
     if (!mounted) return;
 
     if (error != null) {
-      // Utente ha annullato o LinkedIn ha restituito un errore
+      // L'utente ha annullato o LinkedIn ha restituito un errore.
+      Log.w(_tag, 'Callback con errore: $error');
       Navigator.of(context).pop(null);
       return;
     }
 
-    if (code != null && state != null) {
+    // ── Verifica anti-CSRF ───────────────────────────────────────────
+    // Lo state DEVE coincidere con quello che abbiamo generato noi.
+    // Un mismatch indica una risposta non originata da questa sessione.
+    if (state == null || state != _expectedState) {
+      Log.e(_tag, 'State OAuth non valido: flusso scartato (possibile CSRF)');
+      Navigator.of(context).pop(null);
+      return;
+    }
+
+    if (code != null && code.isNotEmpty) {
       Navigator.of(context).pop(LinkedInAuthCode(code: code, state: state));
     } else {
       Navigator.of(context).pop(null);
@@ -106,7 +135,7 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
       _processCallbackUrl(url);
       return NavigationDecision.prevent;
     }
-    // Tutte le altre URL (pagine LinkedIn) → naviga normalmente
+    // Tutte le altre URL (pagine LinkedIn) → naviga normalmente.
     return NavigationDecision.navigate;
   }
 
@@ -167,7 +196,7 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
   }
 }
 
-/// Icona LinkedIn inline (non dipende da asset esterni)
+/// Icona LinkedIn inline (non dipende da asset esterni).
 class _LinkedInIcon extends StatelessWidget {
   final double size;
   const _LinkedInIcon({this.size = 22});

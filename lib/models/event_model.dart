@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import '../core/parsing.dart';
+
 class EventModel {
   final String id;
   final String name;
@@ -19,15 +21,18 @@ class EventModel {
     required this.isActive,
   });
 
+  /// Parsing difensivo: un documento con un campo data malformato non
+  /// deve far crashare l'intera lista eventi. Le date assenti/illeggibili
+  /// degradano all'epoch invece di lanciare (vedi core/parsing.dart).
   factory EventModel.fromMap(String id, Map<String, dynamic> map) {
     return EventModel(
       id: id,
-      name: map['name'] ?? '',
-      description: map['description'] ?? '',
-      location: map['location'] ?? '',
-      startDate: (map['startDate'] as Timestamp).toDate(),
-      endDate: (map['endDate'] as Timestamp).toDate(),
-      isActive: map['isActive'] ?? false,
+      name: parseString(map['name']),
+      description: parseString(map['description']),
+      location: parseString(map['location']),
+      startDate: parseDateTimeOr(map['startDate']),
+      endDate: parseDateTimeOr(map['endDate']),
+      isActive: parseBool(map['isActive']),
     );
   }
 
@@ -42,7 +47,7 @@ class EventModel {
     };
   }
 
-  /// Data e ora dell'evento in formato leggibile (es. "12 gen, 15:00").
+  /// Intervallo di date dell'evento in formato leggibile (es. "12/1 – 13/1").
   String get dateRange {
     final start = '${startDate.day}/${startDate.month}';
     final end = '${endDate.day}/${endDate.month}';

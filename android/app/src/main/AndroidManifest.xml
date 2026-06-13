@@ -4,6 +4,9 @@
     <!-- Internet per WebView OAuth -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Notifiche push (Android 13+ richiede il permesso runtime) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-feature
         android:name="android.hardware.bluetooth_le"
         android:required="true" />
@@ -25,8 +28,14 @@
     <uses-permission
         android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="30" />
+
     <!-- Android 12+ -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <!-- neverForLocation: dichiariamo che NON usiamo lo scan BLE per dedurre
+         la posizione, così su Android 12+ non è richiesto il permesso di
+         localizzazione (coerente con BlePermissionsService). -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 

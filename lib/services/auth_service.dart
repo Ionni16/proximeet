@@ -2,14 +2,13 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../core/logger.dart';
-import '../core/linkedin_config.dart';
 import '../models/user_model.dart';
 
 /// Risultato del login LinkedIn.
@@ -51,6 +50,23 @@ class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final FirebaseFunctions _functions = FirebaseFunctions.instance;
+
+  /// Whitelist dei campi modificabili via [updateProfile].
+  /// Tutto ciò che non è qui (uid, createdAt, fcmToken…) ha il proprio
+  /// percorso dedicato e non può essere toccato per errore da una schermata.
+  static const Set<String> _editableProfileFields = {
+    'firstName',
+    'lastName',
+    'email',
+    'company',
+    'role',
+    'avatarURL',
+    'linkedin',
+    'github',
+    'twitter',
+    'phone',
+    'bio',
+  };
 
   User? get currentUser => _auth.currentUser;
   Stream<User?> get authStateChanges => _auth.authStateChanges();
@@ -126,6 +142,8 @@ class AuthService {
         Log.e('AUTH', 'Errore updateDisplayName post-register', e);
       }
     } catch (e) {
+      // Rollback compensativo: se qualcosa fallisce dopo la creazione
+      // dell'utente Auth, rimuoviamo sia il documento che l'utente.
       final createdUid = credential?.user?.uid;
 
       if (createdUid != null) {
@@ -256,7 +274,6 @@ class AuthService {
     return digest.toString();
   }
 
-
   /// Logga solo i claim utili del JWT Apple, senza stampare il token completo.
   void _logAppleTokenClaims(String identityToken) {
     try {
@@ -282,14 +299,15 @@ class AuthService {
 
   // ── LINKEDIN LOGIN ──────────────────────────────────────────────────────────
 
+  /// Scambia il codice OAuth con un Custom Token tramite la Cloud Function
+  /// `linkedinAuth`. Il client manda SOLO il codice: client_id e redirect_uri
+  /// sono costanti server-side, così il secret non può essere usato con
+  /// parametri scelti dal chiamante. La validazione dello `state` (anti-CSRF)
+  /// avviene nel LinkedInWebViewScreen prima di arrivare qui.
   Future<LinkedInSignInResult> signInWithLinkedIn(String authCode) async {
     try {
       final callable = _functions.httpsCallable('linkedinAuth');
-      final result = await callable.call({
-        'code': authCode,
-        'redirectUri': LinkedInConfig.redirectUri,
-        'clientId': LinkedInConfig.clientId,
-      });
+      final result = await callable.call({'code': authCode});
 
       final data = result.data as Map<dynamic, dynamic>;
       final customToken = data['customToken'] as String;
@@ -339,7 +357,12 @@ class AuthService {
       createdAt: DateTime.now(),
     );
 
-    await _db.collection('users').doc(uid).set(user.toMap());
+    // merge:true così, se esiste già una shell creata da
+    // ensureCurrentUserProfileShell, non perdiamo loginProvider/createdAt.
+    await _db.collection('users').doc(uid).set(
+          user.toMap(),
+          SetOptions(merge: true),
+        );
 
     try {
       await _auth.currentUser?.updateDisplayName(user.fullName);
@@ -433,53 +456,34 @@ class AuthService {
     }, SetOptions(merge: true));
   }
 
+  /// Aggiorna SOLO il proprio documento profilo. La propagazione del nuovo
+  /// avatar nei wallet dei contatti è compito del trigger server-side
+  /// `syncProfileToWallets`: il client non scrive mai in documenti altrui
+  /// (le Firestore Rules lo impedirebbero comunque).
   Future<void> updateAvatar(String uid, String avatarURL) async {
     final normalizedUrl = avatarURL.trim();
 
     await _db.collection('users').doc(uid).set({
       'avatarURL': normalizedUrl,
+      'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
-
-    try {
-      final myContactsSnap = await _db
-          .collection('connections')
-          .doc(uid)
-          .collection('contacts')
-          .get();
-
-      if (myContactsSnap.docs.isEmpty) return;
-
-      final batch = _db.batch();
-      for (final contactDoc in myContactsSnap.docs) {
-        final contactUid = contactDoc.data()['uid'] as String? ?? contactDoc.id;
-        if (contactUid.isEmpty) continue;
-
-        final myEntryRef = _db
-            .collection('connections')
-            .doc(contactUid)
-            .collection('contacts')
-            .doc(uid);
-
-        batch.set(
-          myEntryRef,
-          {
-            'avatarURL': normalizedUrl,
-            'avatarUrl': normalizedUrl,
-            'photoURL': normalizedUrl,
-          },
-          SetOptions(merge: true),
-        );
-      }
-
-      await batch.commit();
-      Log.d('AUTH', 'Avatar propagato a ${myContactsSnap.docs.length} contatti');
-    } catch (e) {
-      Log.e('AUTH', 'Errore propagazione avatar ai contatti', e);
-    }
   }
 
+  /// Aggiorna il profilo applicando una whitelist rigida dei campi.
+  ///
+  /// Chiavi non previste fanno fallire subito la chiamata con [ArgumentError]:
+  /// meglio un errore esplicito in sviluppo che un campo spazzatura (o la
+  /// sovrascrittura di uid/createdAt) in produzione.
   Future<void> updateProfile(String uid, Map<String, dynamic> data) async {
     if (data.isEmpty) return;
+
+    final invalidKeys =
+        data.keys.where((k) => !_editableProfileFields.contains(k)).toList();
+    if (invalidKeys.isNotEmpty) {
+      throw ArgumentError(
+        'updateProfile: campi non ammessi: ${invalidKeys.join(', ')}',
+      );
+    }
 
     final normalized = <String, dynamic>{};
 
@@ -499,6 +503,8 @@ class AuthService {
         normalized[key] = value;
       }
     }
+
+    normalized['updatedAt'] = FieldValue.serverTimestamp();
 
     await _db.collection('users').doc(uid).set(
           normalized,
@@ -522,6 +528,8 @@ class AuthService {
     }
   }
 
+  /// Richiede il permesso notifiche e salva il token FCM corrente.
+  /// Da chiamare dopo il login (vedi ProfileGateScreen / EventListScreen).
   Future<void> saveFcmToken() async {
     final uid = _auth.currentUser?.uid;
     if (uid == null) return;
@@ -533,12 +541,28 @@ class AuthService {
       final token = await messaging.getToken();
       if (token == null || token.trim().isEmpty) return;
 
+      await persistFcmToken(token);
+    } catch (e) {
+      Log.e('AUTH', 'Errore salvataggio FCM token', e);
+    }
+  }
+
+  /// Persiste un token FCM già ottenuto (usato anche dal listener di
+  /// onTokenRefresh in NotificationService, che non deve richiedere permessi).
+  Future<void> persistFcmToken(String token) async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) return;
+
+    final trimmed = token.trim();
+    if (trimmed.isEmpty) return;
+
+    try {
       await _db.collection('users').doc(uid).set({
-        'fcmToken': token.trim(),
+        'fcmToken': trimmed,
         'fcmTokenUpdatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
     } catch (e) {
-      Log.e('AUTH', 'Errore salvataggio FCM token', e);
+      Log.e('AUTH', 'Errore persistenza FCM token', e);
     }
   }
 
