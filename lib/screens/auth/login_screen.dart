@@ -2,6 +2,8 @@
 
 import 'dart:math' show sin, cos, pi;
 import 'package:flutter/material.dart';
+import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import '../../services/auth_service.dart';
 import '../../models/user_model.dart';
@@ -164,9 +166,23 @@ class _LoginScreenState extends State<LoginScreen>
           );
         }
       }
+    } on FirebaseFunctionsException catch (e) {
+      Log.e('LOGIN', 'Errore LinkedIn Function: ${e.code} ${e.message}', e);
+      if (mounted) {
+        final message = (e.message ?? '').trim();
+        setState(() => _errorMessage = message.isEmpty
+            ? 'LinkedIn non disponibile (${e.code}).'
+            : 'LinkedIn: $message');
+      }
+    } on FirebaseAuthException catch (e) {
+      Log.e('LOGIN', 'Errore Firebase Auth LinkedIn: ${e.code} ${e.message}', e);
+      if (mounted) {
+        setState(() => _errorMessage =
+            'Accesso Firebase non riuscito: ${e.message ?? e.code}');
+      }
     } catch (e) {
       Log.e('LOGIN', 'Errore LinkedIn login', e);
-      if (mounted) setState(() => _errorMessage = 'Errore accesso con LinkedIn. Riprova.');
+      if (mounted) setState(() => _errorMessage = 'Errore LinkedIn: $e');
     } finally {
       if (mounted) setState(() => _linkedInLoading = false);
     }
@@ -494,15 +510,17 @@ class _LogoSection extends StatelessWidget {
               child: child,
             );
           },
-          child: const Icon(
-            Icons.wifi_tethering_rounded,
-            size: 36,
-            color: Color(0xFF4D8EF7),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Image.asset(
+              'assets/icon/splash_logo.png',
+              fit: BoxFit.contain,
+            ),
           ),
         ),
         const SizedBox(height: 18),
         const Text(
-          'ProxiMeet',
+          'Swaply',
           style: TextStyle(
             fontSize: 30,
             fontWeight: FontWeight.w800,

@@ -4,22 +4,22 @@
 	<dict>
 		<!-- BLE: scan + advertising -->
 		<key>NSBluetoothAlwaysUsageDescription</key>
-		<string>ProxiMeet usa il Bluetooth per rilevare le persone vicine durante gli eventi</string>
+		<string>Swaply usa il Bluetooth per rilevare le persone vicine durante gli eventi</string>
 		<key>NSBluetoothPeripheralUsageDescription</key>
-		<string>ProxiMeet trasmette il tuo identificativo via Bluetooth per farti trovare dalle persone vicine</string>
+		<string>Swaply trasmette il tuo identificativo via Bluetooth per farti trovare dalle persone vicine</string>
 		<!-- Location (richiesto da BLE su alcune versioni iOS) -->
 		<key>NSLocationWhenInUseUsageDescription</key>
-		<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi.</string>
+		<string>Swaply usa la posizione per rilevare beacon vicini durante gli eventi.</string>
 		<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-		<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi anche quando l’app non è in primo piano.</string>
+		<string>Swaply usa la posizione per rilevare beacon vicini durante gli eventi anche quando l’app non è in primo piano.</string>
 		<key>NSLocationAlwaysUsageDescription</key>
-		<string>ProxiMeet usa la posizione per rilevare beacon vicini durante gli eventi.</string>
+		<string>Swaply usa la posizione per rilevare beacon vicini durante gli eventi.</string>
 		<!-- Camera per QR scanner -->
 		<key>NSCameraUsageDescription</key>
-		<string>ProxiMeet usa la fotocamera per scansionare i QR code dei contatti</string>
+		<string>Swaply usa la fotocamera per scansionare i QR code dei contatti</string>
 		<!-- Galleria per avatar -->
 		<key>NSPhotoLibraryUsageDescription</key>
-		<string>ProxiMeet accede alla galleria per impostare la tua foto profilo</string>
+		<string>Swaply accede alla galleria per impostare la tua foto profilo</string>
 		<key>UIBackgroundModes</key>
 		<array>
 			<string>bluetooth-central</string>
@@ -31,7 +31,7 @@
 		<key>CFBundleDevelopmentRegion</key>
 		<string>$(DEVELOPMENT_LANGUAGE)</string>
 		<key>CFBundleDisplayName</key>
-		<string>ProxiMeet</string>
+		<string>Swaply</string>
 		<key>CFBundleExecutable</key>
 		<string>$(EXECUTABLE_NAME)</string>
 		<key>CFBundleIdentifier</key>

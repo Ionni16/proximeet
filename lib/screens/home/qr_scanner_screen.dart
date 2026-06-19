@@ -43,7 +43,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
     // Controlla che il QR sia di ProxiMeet
     if (!raw.startsWith('proximeet://user/')) {
-      _showError('QR non valido — non è un codice ProxiMeet');
+      _showError('QR non valido — non è un codice Swaply');
       return;
     }
 
@@ -182,7 +182,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: const Text(
-                    'Inquadra il QR ProxiMeet di un\'altra persona '
+                    'Inquadra il QR Swaply di un\'altra persona '
                     'per scambiare il biglietto',
                     style: TextStyle(
                       color: Colors.white70,

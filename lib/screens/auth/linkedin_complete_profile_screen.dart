@@ -188,7 +188,7 @@ class _LinkedInCompleteProfileScreenState
                           ),
                           const SizedBox(height: 16),
                           const Text(
-                            'Benvenuto in ProxiMeet!',
+                            'Benvenuto in Swaply!',
                             style: TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.w800,
@@ -453,7 +453,7 @@ class _LinkedInCompleteProfileScreenState
                               ),
                             )
                           : const Text(
-                              'Entra in ProxiMeet',
+                              'Entra in Swaply',
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,

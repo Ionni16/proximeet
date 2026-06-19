@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../models/user_model.dart';
@@ -49,33 +50,74 @@ class _ProfileContent extends StatefulWidget {
 class _ProfileContentState extends State<_ProfileContent> {
   bool _uploadingPhoto = false;
   bool _deletingAccount = false;
+  bool _loggingOut = false;
 
   Future<void> _changePhoto() async {
-    final file = await StorageService.instance.pickImage();
-    if (file == null) return;
-    setState(() => _uploadingPhoto = true);
     try {
+      final file = await StorageService.instance.pickImage();
+      if (file == null || !mounted) return;
+
+      setState(() => _uploadingPhoto = true);
       final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid == null) return;
+      if (uid == null) throw StateError('Utente non autenticato');
+
       final url = await StorageService.instance.uploadAvatar(uid, file);
-      if (url != null) {
-        // 1. Aggiorna il documento principale su Firestore
-        await AuthService.instance.updateAvatar(uid, url);
+      if (url == null || url.isEmpty) {
+        throw StateError('Firebase Storage non ha restituito la foto');
+      }
 
-        // 2. Aggiorna anche il token BLE nell'evento corrente
-        //    così gli altri vedono subito la nuova foto
-        await EventSessionService.instance.updateMyProfileInEvent({
-          'avatarURL': url,
-        });
+      await AuthService.instance.updateAvatar(uid, url);
+      await EventSessionService.instance.updateMyProfileInEvent({
+        'avatarURL': url,
+      });
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Foto aggiornata!')),
-          );
-        }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Foto aggiornata correttamente')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Impossibile aggiornare la foto: $e')),
+        );
       }
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
+    }
+  }
+
+
+  Future<void> _confirmAndLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Disconnettersi?'),
+        content: const Text('Uscirai dal tuo account su questo dispositivo.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Logout'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _loggingOut = true);
+    try {
+      await AuthService.instance.logout();
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loggingOut = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Logout non riuscito: $e')),
+        );
+      }
     }
   }
 
@@ -134,14 +176,27 @@ class _ProfileContentState extends State<_ProfileContent> {
           const SnackBar(content: Text('Account eliminato')),
         );
       }
+    } on FirebaseFunctionsException catch (e) {
+      if (mounted) {
+        setState(() => _deletingAccount = false);
+        final detail = (e.message ?? '').trim();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              detail.isEmpty
+                  ? 'Impossibile eliminare l\'account (${e.code}). Riprova.'
+                  : 'Impossibile eliminare l\'account: $detail (${e.code})',
+            ),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _deletingAccount = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Text(
-              'Impossibile eliminare l\'account. Controlla la connessione e riprova.',
-            ),
+            content: Text('Impossibile eliminare l\'account: $e'),
             backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
@@ -351,6 +406,26 @@ class _ProfileContentState extends State<_ProfileContent> {
           const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: _loggingOut
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.logout, size: 20),
+              label: Text(_loggingOut ? 'Disconnessione…' : 'Logout'),
+              onPressed: (_loggingOut || _deletingAccount)
+                  ? null
+                  : _confirmAndLogout,
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
             child: TextButton.icon(
               icon: _deletingAccount
                   ? const SizedBox(
@@ -422,7 +497,7 @@ class _ProfileContentState extends State<_ProfileContent> {
             ),
             const SizedBox(height: 24),
             Text(
-              'Il tuo QR ProxiMeet',
+              'Il tuo QR Swaply',
               style: theme.textTheme.titleLarge?.copyWith(
                 fontWeight: FontWeight.bold,
               ),

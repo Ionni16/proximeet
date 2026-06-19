@@ -265,10 +265,12 @@ class _SplashScreenState extends State<SplashScreen>
                           child: child,
                         );
                       },
-                      child: const Icon(
-                        Icons.wifi_tethering_rounded,
-                        size: 44,
-                        color: Color(0xFF4D8EF7),
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Image.asset(
+                          'assets/icon/splash_logo.png',
+                          fit: BoxFit.contain,
+                        ),
                       ),
                     ),
                   ),
@@ -282,7 +284,7 @@ class _SplashScreenState extends State<SplashScreen>
                   child: FadeTransition(
                     opacity: _titleOpacity,
                     child: const Text(
-                      'ProxiMeet',
+                      'Swaply',
                       style: TextStyle(
                         fontSize: 36,
                         fontWeight: FontWeight.w800,

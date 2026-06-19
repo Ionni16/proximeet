@@ -5,12 +5,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:crypto/crypto.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
 import '../core/logger.dart';
-import '../core/linkedin_config.dart';
 import '../models/user_model.dart';
+import 'event_session_service.dart';
 
 /// Risultato del login LinkedIn.
 class LinkedInSignInResult {
@@ -51,6 +52,7 @@ class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final FirebaseFunctions _functions = FirebaseFunctions.instance;
+  final FirebaseStorage _storage = FirebaseStorage.instance;
 
   User? get currentUser => _auth.currentUser;
   Stream<User?> get authStateChanges => _auth.authStateChanges();
@@ -283,34 +285,54 @@ class AuthService {
   // ── LINKEDIN LOGIN ──────────────────────────────────────────────────────────
 
   Future<LinkedInSignInResult> signInWithLinkedIn(String authCode) async {
-    try {
-      final callable = _functions.httpsCallable('linkedinAuth');
-      final result = await callable.call({
-        'code': authCode,
-        'redirectUri': LinkedInConfig.redirectUri,
-        'clientId': LinkedInConfig.clientId,
-      });
+    final callable = _functions.httpsCallable(
+      'linkedinAuth',
+      options: HttpsCallableOptions(timeout: const Duration(minutes: 2)),
+    );
 
-      final data = result.data as Map<dynamic, dynamic>;
-      final customToken = data['customToken'] as String;
-      final isNewUser = data['isNewUser'] as bool? ?? true;
-      final profile = Map<String, dynamic>.from(
-        data['profile'] as Map<dynamic, dynamic>,
-      );
+    FirebaseFunctionsException? lastError;
+    for (var attempt = 1; attempt <= 2; attempt++) {
+      try {
+        final result = await callable.call({'code': authCode});
+        final data = Map<dynamic, dynamic>.from(result.data as Map);
+        final customToken = data['customToken']?.toString() ?? '';
+        if (customToken.isEmpty) {
+          throw const FormatException('Custom token LinkedIn mancante');
+        }
 
-      final credential = await _auth.signInWithCustomToken(customToken);
+        final isNewUser = data['isNewUser'] as bool? ?? true;
+        final rawProfile = data['profile'];
+        final profile = rawProfile is Map
+            ? Map<String, dynamic>.from(rawProfile)
+            : <String, dynamic>{};
 
-      Log.d('AUTH', 'LinkedIn login OK - uid: ${credential.user?.uid}, newUser: $isNewUser');
-
-      return LinkedInSignInResult(
-        credential: credential,
-        isNewUser: isNewUser,
-        linkedInProfile: profile,
-      );
-    } catch (e) {
-      Log.e('AUTH', 'Errore LinkedIn signIn', e);
-      rethrow;
+        final credential = await _auth.signInWithCustomToken(customToken);
+        Log.d(
+          'AUTH',
+          'LinkedIn login OK - uid: ${credential.user?.uid}, newUser: $isNewUser',
+        );
+        return LinkedInSignInResult(
+          credential: credential,
+          isNewUser: isNewUser,
+          linkedInProfile: profile,
+        );
+      } on FirebaseFunctionsException catch (e, st) {
+        lastError = e;
+        Log.e(
+          'AUTH',
+          'LinkedIn Function tentativo $attempt: ${e.code} ${e.message}',
+          e,
+          st,
+        );
+        final retryable = e.code == 'resource-exhausted' ||
+            e.code == 'unavailable' ||
+            e.code == 'deadline-exceeded';
+        if (!retryable || attempt == 2) rethrow;
+        await Future<void>.delayed(const Duration(seconds: 3));
+      }
     }
+
+    throw lastError ?? StateError('Accesso LinkedIn non completato');
   }
 
   Future<void> createLinkedInUserProfile({
@@ -353,6 +375,11 @@ class AuthService {
   // ── METODI COMUNI ────────────────────────────────────────────────────────────
 
   Future<void> logout() async {
+    try {
+      await EventSessionService.instance.leaveEvent();
+    } catch (e, st) {
+      Log.e('AUTH', 'Errore arresto sessione durante logout', e, st);
+    }
     await _auth.signOut();
   }
 
@@ -367,33 +394,88 @@ class AuthService {
   /// Dopo la cancellazione facciamo signOut per ripulire lo stato locale:
   /// lo StreamBuilder su authStateChanges riporterà automaticamente al login.
   Future<void> deleteAccount() async {
-    final uid = _auth.currentUser?.uid;
-    if (uid == null) {
+    final user = _auth.currentUser;
+    if (user == null) {
       throw FirebaseAuthException(
         code: 'no-current-user',
         message: 'Nessun utente autenticato.',
       );
     }
 
-    // Chiama la Cloud Function che elimina tutti i dati lato server e
-    // l'utente Auth. La logica di uscita dall'evento (stop BLE) è gestita
-    // dal chiamante prima di invocare questo metodo.
+    await user.getIdToken(true);
+
+    final callable = _functions.httpsCallable(
+      'deleteAccount',
+      options: HttpsCallableOptions(timeout: const Duration(minutes: 3)),
+    );
+
     try {
-      await _functions.httpsCallable('deleteAccount').call();
-    } on FirebaseFunctionsException catch (e) {
-      Log.e('AUTH', 'Errore Cloud Function deleteAccount', e);
+      final result = await callable.call();
+      Log.d('AUTH', 'deleteAccount completata lato server: ${result.data}');
+    } on FirebaseFunctionsException catch (e, st) {
+      Log.e(
+        'AUTH',
+        'deleteAccount server: code=${e.code}, message=${e.message}, details=${e.details}',
+        e,
+        st,
+      );
+
+      // In caso di quota/cold-start/servizio temporaneamente indisponibile,
+      // eseguiamo almeno la cancellazione immediata dei dati personali e Auth.
+      // La Function resta il percorso preferito per la pulizia dei riferimenti
+      // presenti nei wallet degli altri utenti.
+      const fallbackCodes = {
+        'resource-exhausted',
+        'unavailable',
+        'deadline-exceeded',
+        'internal',
+      };
+      if (!fallbackCodes.contains(e.code)) rethrow;
+      await _deleteCurrentAccountLocally(user);
+    }
+
+    try {
+      await _auth.signOut();
+    } catch (_) {}
+  }
+
+  Future<void> _deleteCurrentAccountLocally(User user) async {
+    final uid = user.uid;
+
+    // Best effort: ciascun passaggio è indipendente per non lasciare l'utente
+    // bloccato se un documento o un file non esiste già più.
+    try {
+      await _db.collection('connections').doc(uid).delete();
+    } catch (e, st) {
+      Log.e('AUTH', 'Fallback: errore eliminazione wallet', e, st);
+    }
+
+    try {
+      await _db.collection('users').doc(uid).delete();
+    } catch (e, st) {
+      Log.e('AUTH', 'Fallback: errore eliminazione profilo', e, st);
+    }
+
+    try {
+      await _storage.ref('avatars/$uid.jpg').delete();
+    } catch (e) {
+      // object-not-found è normale per utenti senza avatar.
+      Log.d('AUTH', 'Fallback avatar non eliminato: $e');
+    }
+
+    try {
+      await user.delete();
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'requires-recent-login') {
+        throw FirebaseAuthException(
+          code: e.code,
+          message: 'Per sicurezza devi uscire, accedere di nuovo e ripetere subito l’eliminazione.',
+        );
+      }
       rethrow;
     }
 
-    // L'utente Auth è già stato eliminato lato server: signOut ripulisce
-    // solo la sessione locale e fa scattare il redirect al login.
-    try {
-      await _auth.signOut();
-    } catch (e) {
-      Log.e('AUTH', 'Errore signOut post-eliminazione', e);
-    }
-
-    Log.d('AUTH', 'Account eliminato e sessione locale ripulita');
+    Log.d('AUTH', 'Account eliminato tramite fallback locale');
   }
 
   Future<UserModel?> getUserProfile(String uid) async {

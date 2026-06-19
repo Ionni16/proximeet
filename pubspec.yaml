@@ -2,7 +2,7 @@ name: ProxiMeet
 description: "ProxiMeet - Proximity networking for conferences"
 publish_to: 'none'
 
-version: 1.0.1+2
+version: 1.0.1+49
 
 environment:
   sdk: ^3.11.4
@@ -18,7 +18,8 @@ dependencies:
   cloud_firestore: ^5.6.6
   firebase_storage: ^12.4.5
   firebase_messaging: ^15.2.5
-  cloud_functions: ^5.2.1      # ← NUOVO: per chiamare linkedinAuth
+  cloud_functions: ^5.2.1
+  firebase_app_check: ^0.3.2+5
 
   # Permessi
   permission_handler: ^11.3.1
@@ -61,16 +62,18 @@ flutter_launcher_icons:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/
 
 flutter_native_splash:
   color: "#060D1A"
-  image: assets/icon/app_icon.png        # Android: logo centrato
+  image: ""                              # nessun logo nello splash di caricamento
   color_android: "#060D1A"
   color_ios: "#060D1A"
   image_ios: ""                          # iOS: solo colore, niente logo
   android_12:
     color: "#060D1A"
-    image: assets/icon/app_icon.png
+    image: ""
     icon_background_color: "#060D1A"
   fullscreen: false
   web: false

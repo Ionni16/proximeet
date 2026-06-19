@@ -127,7 +127,7 @@ class _BleDiagScreenState extends State<BleDiagScreen> {
                   const Padding(
                     padding: EdgeInsets.only(top: 8),
                     child: Text(
-                      '⚠️ PERMESSO NEGATO. Impostazioni → Privacy → Bluetooth → ProxiMeet → ON',
+                      '⚠️ PERMESSO NEGATO. Impostazioni → Privacy → Bluetooth → Swaply → ON',
                       style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
                     ),
                   ),

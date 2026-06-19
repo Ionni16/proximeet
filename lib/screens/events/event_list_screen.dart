@@ -69,7 +69,7 @@ class _EventListScreenState extends State<EventListScreen> {
                 size: 40, color: Color(0xFF4D8EF7)),
             title: const Text('Bluetooth spento'),
             content: const Text(
-              'ProxiMeet usa Bluetooth/iBeacon per rilevare le persone vicine. '
+              'Swaply usa Bluetooth/iBeacon per rilevare le persone vicine. '
               'Puoi entrare comunque, ma il rilevamento potrebbe non funzionare.',
             ),
             actions: [
@@ -241,15 +241,17 @@ class _EventListScreenState extends State<EventListScreen> {
                                   ),
                                 ],
                               ),
-                              child: const Icon(
-                                Icons.wifi_tethering,
-                                size: 20,
-                                color: Color(0xFF4D8EF7),
+                              child: Padding(
+                                padding: const EdgeInsets.all(6),
+                                child: Image.asset(
+                                  'assets/icon/splash_logo.png',
+                                  fit: BoxFit.contain,
+                                ),
                               ),
                             ),
                             const SizedBox(width: 12),
                             const Text(
-                              'ProxiMeet',
+                              'Swaply',
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.w800,

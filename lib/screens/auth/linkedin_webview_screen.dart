@@ -1,21 +1,9 @@
-// lib/screens/auth/linkedin_webview_screen.dart
-//
-// Schermata WebView che gestisce il flusso OAuth di LinkedIn.
-// Intercetta il redirect URI e restituisce il codice autorizzativo.
-//
-// FIX ANDROID: su Android, WebView NON chiama onNavigationRequest per i
-// redirect HTTP 302 lato server (limitazione di shouldOverrideUrlLoading).
-// La soluzione è intercettare il redirect anche in onPageStarted, che
-// viene sempre chiamato indipendentemente dall'origine della navigazione.
-// Il flag _handled evita doppia elaborazione nei casi in cui entrambi
-// i callback scattano (es. iOS).
-
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../../core/linkedin_config.dart';
+import '../../core/logger.dart';
 
-/// Risultato del flusso OAuth LinkedIn.
 class LinkedInAuthCode {
   final String code;
   final String state;
@@ -31,83 +19,127 @@ class LinkedInWebViewScreen extends StatefulWidget {
 
 class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
   late final WebViewController _controller;
+  late final LinkedInAuthRequest _authRequest;
+
   bool _loading = true;
-  bool _handled = false; // evita callback doppi (es. onPageStarted + onNavigationRequest)
+  bool _handled = false;
+  String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-
+    _authRequest = LinkedInConfig.createAuthorizationRequest();
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0xFF050D1E))
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageStarted: (url) {
-            // ── FIX ANDROID ──────────────────────────────────────────────────
-            // Su Android i redirect HTTP 302 non passano per onNavigationRequest.
-            // onPageStarted invece scatta sempre, quindi intercettiamo qui.
-            if (url.startsWith(LinkedInConfig.redirectUri)) {
+            if (_isCallback(url)) {
               _processCallbackUrl(url);
               return;
             }
-            setState(() => _loading = true);
-          },
-          onPageFinished: (_) => setState(() => _loading = false),
-          onWebResourceError: (error) {
-            // Se il redirect è già stato gestito, ignoriamo gli errori
-            // del caricamento della pagina linkedin-callback (che può non esistere).
-            if (_handled) return;
-            if (error.errorType == WebResourceErrorType.hostLookup ||
-                error.errorType == WebResourceErrorType.connect) {
-              setState(() => _loading = false);
+            if (mounted) {
+              setState(() {
+                _loading = true;
+                _errorMessage = null;
+              });
             }
           },
+          onPageFinished: (_) {
+            if (mounted && !_handled) setState(() => _loading = false);
+          },
+          onWebResourceError: (error) {
+            if (_handled || !mounted || error.isForMainFrame != true) return;
+            Log.e('LINKEDIN', 'WebView error ${error.errorCode}: ${error.description}');
+            setState(() {
+              _loading = false;
+              _errorMessage =
+                  'Impossibile aprire LinkedIn. Controlla la connessione e riprova.';
+            });
+          },
           onNavigationRequest: (request) {
-            // ── iOS / user-initiated navigation ──────────────────────────────
-            // Su iOS questo scatta anche per i redirect. Su Android solo per
-            // navigazioni avviate dall'utente o da JavaScript.
-            return _handleNavigationRequest(request.url);
+            if (_isCallback(request.url)) {
+              _processCallbackUrl(request.url);
+              return NavigationDecision.prevent;
+            }
+            return NavigationDecision.navigate;
           },
         ),
-      )
-      ..loadRequest(Uri.parse(LinkedInConfig.authorizationUrl));
+      );
+
+    _startLogin();
   }
 
-  // ── Logica comune ────────────────────────────────────────────────────────────
+  Future<void> _startLogin() async {
+    try {
+      // Evita cookie/sessioni OAuth corrotte o rimaste da tentativi precedenti.
+      await WebViewCookieManager().clearCookies();
+      await _controller.clearCache();
+      await _controller.loadRequest(_authRequest.uri);
+    } catch (e) {
+      Log.e('LINKEDIN', 'Errore avvio OAuth', e);
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _errorMessage = 'Impossibile avviare il login LinkedIn.';
+        });
+      }
+    }
+  }
 
-  /// Estrae il codice OAuth dall'URL di callback e chiude il WebView.
-  /// Chiamato sia da onPageStarted che da onNavigationRequest.
+  bool _isCallback(String url) =>
+      url.startsWith(LinkedInConfig.redirectUri);
+
   void _processCallbackUrl(String url) {
     if (_handled) return;
-    _handled = true;
 
-    final uri = Uri.parse(url);
-    final code = uri.queryParameters['code'];
-    final state = uri.queryParameters['state'];
-    final error = uri.queryParameters['error'];
-
-    if (!mounted) return;
-
-    if (error != null) {
-      // Utente ha annullato o LinkedIn ha restituito un errore
-      Navigator.of(context).pop(null);
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      _showCallbackError('Risposta LinkedIn non valida.');
       return;
     }
 
-    if (code != null && state != null) {
-      Navigator.of(context).pop(LinkedInAuthCode(code: code, state: state));
-    } else {
-      Navigator.of(context).pop(null);
+    final returnedState = uri.queryParameters['state'];
+    final error = uri.queryParameters['error'];
+    final errorDescription = uri.queryParameters['error_description'];
+    final code = uri.queryParameters['code'];
+
+    if (error != null) {
+      _showCallbackError(
+        errorDescription?.trim().isNotEmpty == true
+            ? errorDescription!
+            : 'Accesso LinkedIn annullato o non autorizzato.',
+      );
+      return;
+    }
+
+    // Verifica CSRF: lo state ricevuto deve essere esattamente quello generato
+    // prima di aprire la pagina LinkedIn.
+    if (returnedState == null || returnedState != _authRequest.state) {
+      _showCallbackError('Verifica di sicurezza LinkedIn non riuscita. Riprova.');
+      return;
+    }
+
+    if (code == null || code.trim().isEmpty) {
+      _showCallbackError('LinkedIn non ha restituito il codice di accesso.');
+      return;
+    }
+
+    _handled = true;
+    if (mounted) {
+      Navigator.of(context).pop(
+        LinkedInAuthCode(code: code, state: returnedState),
+      );
     }
   }
 
-  NavigationDecision _handleNavigationRequest(String url) {
-    if (url.startsWith(LinkedInConfig.redirectUri)) {
-      _processCallbackUrl(url);
-      return NavigationDecision.prevent;
-    }
-    // Tutte le altre URL (pagine LinkedIn) → naviga normalmente
-    return NavigationDecision.navigate;
+  void _showCallbackError(String message) {
+    if (_handled || !mounted) return;
+    setState(() {
+      _loading = false;
+      _errorMessage = message;
+    });
   }
 
   @override
@@ -137,9 +169,9 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
         children: [
           WebViewWidget(controller: _controller),
           if (_loading)
-            Container(
-              color: const Color(0xFF050D1E),
-              child: const Center(
+            const ColoredBox(
+              color: Color(0xFF050D1E),
+              child: Center(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -152,12 +184,47 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
                     SizedBox(height: 16),
                     Text(
                       'Connessione a LinkedIn...',
-                      style: TextStyle(
-                        color: Color(0xFF8BA3C7),
-                        fontSize: 14,
-                      ),
+                      style: TextStyle(color: Color(0xFF8BA3C7), fontSize: 14),
                     ),
                   ],
+                ),
+              ),
+            ),
+          if (_errorMessage != null)
+            ColoredBox(
+              color: const Color(0xFF050D1E),
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(28),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.error_outline,
+                          color: Color(0xFFFF6B6B), size: 48),
+                      const SizedBox(height: 16),
+                      Text(
+                        _errorMessage!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Color(0xFFE8F0FE),
+                          fontSize: 15,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      FilledButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _errorMessage = null;
+                            _loading = true;
+                            _handled = false;
+                          });
+                          _startLogin();
+                        },
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Riprova'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -167,7 +234,6 @@ class _LinkedInWebViewScreenState extends State<LinkedInWebViewScreen> {
   }
 }
 
-/// Icona LinkedIn inline (non dipende da asset esterni)
 class _LinkedInIcon extends StatelessWidget {
   final double size;
   const _LinkedInIcon({this.size = 22});

@@ -555,11 +555,15 @@ class ProxiMeetBeaconPlugin(
     }
 
     private fun hasScanPermissions(): Boolean {
-        val locationOk = hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+        // Android 12+ (API 31): il BLE scan usa BLUETOOTH_SCAN (+ CONNECT per il GATT).
+        // La ACCESS_FINE_LOCATION NON serve: nel manifest è maxSdkVersion=30 e con il
+        // flag neverForLocation non viene mai concessa. Pretenderla qui faceva fallire
+        // l'avvio del GATT su tutti i device Android 12+.
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            hasPermission(Manifest.permission.BLUETOOTH_SCAN) && hasPermission(Manifest.permission.BLUETOOTH_CONNECT) && locationOk
+            hasPermission(Manifest.permission.BLUETOOTH_SCAN) && hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
         } else {
-            locationOk
+            // Android 11 e precedenti: lo scan BLE richiede ACCESS_FINE_LOCATION.
+            hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
         }
     }
 
@@ -571,10 +575,11 @@ class ProxiMeetBeaconPlugin(
 
     private fun missingScanPermissionsMessage(): String {
         val missing = mutableListOf<String>()
-        if (!hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) missing.add("ACCESS_FINE_LOCATION")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             if (!hasPermission(Manifest.permission.BLUETOOTH_SCAN)) missing.add("BLUETOOTH_SCAN")
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) missing.add("BLUETOOTH_CONNECT")
+        } else {
+            if (!hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)) missing.add("ACCESS_FINE_LOCATION")
         }
         return "Permessi scan mancanti: ${missing.joinToString(", ")}"
     }

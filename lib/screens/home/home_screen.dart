@@ -124,11 +124,14 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
 
                 // Logo e nome dell'evento corrente
-                const SizedBox(
+                SizedBox(
                   width: 28,
                   height: 28,
-                  child: Icon(Icons.wifi_tethering,
-                      size: 21, color: Color(0xFF4D8EF7)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Image.asset('assets/icon/splash_logo.png',
+                        fit: BoxFit.contain),
+                  ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(

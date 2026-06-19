@@ -14,6 +14,9 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  // App Check resta disattivato finché i provider Android/iOS non sono
+  // registrati nella Firebase Console. Le Cloud Functions non ne richiedono
+  // l'enforcement, quindi le chiamate funzionano senza token App Check.
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -55,7 +58,7 @@ class _ProxiMeetAppState extends State<ProxiMeetApp>
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ProxiMeet',
+      title: 'Swaply',
       debugShowCheckedModeBanner: false,
       theme: _buildLightTheme(),
       darkTheme: _buildDarkTheme(),

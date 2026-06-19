@@ -8,6 +8,8 @@ const querystring = require("querystring");
 admin.initializeApp();
 
 const linkedinClientSecret = defineSecret("LINKEDIN_CLIENT_SECRET");
+const LINKEDIN_CLIENT_ID = "77ldn2lgmzxacy";
+const LINKEDIN_REDIRECT_URI = "https://proximeet-5ffe2.web.app/linkedin-callback";
 
 async function getUserFcmToken(userId) {
   const db = admin.firestore();
@@ -43,7 +45,9 @@ function httpsPost(url, postData, headers = {}) {
       let data = "";
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+        let parsed;
+        try { parsed = JSON.parse(data); } catch { parsed = data; }
+        resolve({ statusCode: res.statusCode || 0, data: parsed });
       });
     });
     req.on("error", reject);
@@ -65,7 +69,9 @@ function httpsGet(url, headers = {}) {
       let data = "";
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
-        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+        let parsed;
+        try { parsed = JSON.parse(data); } catch { parsed = data; }
+        resolve({ statusCode: res.statusCode || 0, data: parsed });
       });
     });
     req.on("error", reject);
@@ -74,12 +80,18 @@ function httpsGet(url, headers = {}) {
 }
 
 exports.linkedinAuth = onCall(
-  { secrets: [linkedinClientSecret] },
+  {
+    region: "us-central1",
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    enforceAppCheck: false,
+    secrets: [linkedinClientSecret],
+  },
   async (request) => {
-    const { code, redirectUri, clientId } = request.data;
+    const { code } = request.data || {};
 
-    if (!code || !redirectUri || !clientId) {
-      throw new HttpsError("invalid-argument", "Parametri mancanti: code, redirectUri, clientId");
+    if (!code || typeof code !== "string") {
+      throw new HttpsError("invalid-argument", "Codice LinkedIn mancante");
     }
 
     const clientSecret = linkedinClientSecret.value();
@@ -87,13 +99,17 @@ exports.linkedinAuth = onCall(
     // 1. Scambia il codice per un access token
     let tokenData;
     try {
-      tokenData = await httpsPost("https://www.linkedin.com/oauth/v2/accessToken", {
+      const tokenResponse = await httpsPost("https://www.linkedin.com/oauth/v2/accessToken", {
         grant_type: "authorization_code",
         code,
-        redirect_uri: redirectUri,
-        client_id: clientId,
+        redirect_uri: LINKEDIN_REDIRECT_URI,
+        client_id: LINKEDIN_CLIENT_ID,
         client_secret: clientSecret,
       });
+      tokenData = tokenResponse.data;
+      if (tokenResponse.statusCode < 200 || tokenResponse.statusCode >= 300) {
+        console.error("LinkedIn token HTTP error:", tokenResponse.statusCode, tokenData);
+      }
     } catch (e) {
       console.error("Errore LinkedIn token exchange:", e);
       throw new HttpsError("internal", "Impossibile ottenere access token LinkedIn");
@@ -109,9 +125,14 @@ exports.linkedinAuth = onCall(
     // 2. Recupera profilo utente via OpenID Connect
     let profile;
     try {
-      profile = await httpsGet("https://api.linkedin.com/v2/userinfo", {
+      const profileResponse = await httpsGet("https://api.linkedin.com/v2/userinfo", {
         Authorization: `Bearer ${accessToken}`,
       });
+      profile = profileResponse.data;
+      if (profileResponse.statusCode < 200 || profileResponse.statusCode >= 300) {
+        console.error("LinkedIn userinfo HTTP error:", profileResponse.statusCode, profile);
+        throw new Error(`LinkedIn userinfo HTTP ${profileResponse.statusCode}`);
+      }
     } catch (e) {
       console.error("Errore LinkedIn userinfo:", e);
       throw new HttpsError("internal", "Impossibile recuperare profilo LinkedIn");
@@ -245,85 +266,88 @@ exports.respondCardRequest = onCall(async (request) => {
  * Ordine: prima tutti i dati Firestore/Storage, poi l'utente Auth per ultimo,
  * così se qualcosa fallisce a metà l'utente può ritentare (l'Auth è ancora vivo).
  */
-exports.deleteAccount = onCall(async (request) => {
-  const uid = request.auth?.uid;
-  if (!uid) {
-    throw new HttpsError("unauthenticated", "Devi essere autenticato per eliminare l'account.");
-  }
-
-  const db = admin.firestore();
-  const bulkWriter = db.bulkWriter();
-  // Non bloccare l'intera cancellazione per il fallimento di un singolo doc:
-  // ritenta qualche volta, poi prosegui.
-  bulkWriter.onWriteError((error) => {
-    if (error.failedAttempts < 3) return true;
-    console.error(`deleteAccount: doc non eliminato ${error.documentRef.path}:`, error.message);
-    return false;
-  });
-
-  try {
-    // 1. Documento utente principale (contiene profilo, fcmToken, ecc.)
-    await db.collection("users").doc(uid).delete();
-
-    // 2. Wallet dell'utente: connections/{uid} e tutta la sottocollezione contacts
-    await db.recursiveDelete(db.collection("connections").doc(uid), bulkWriter);
-
-    // 3. Rimuovi l'utente dai wallet di TUTTI gli altri (collection group su contacts).
-    //    Ogni contatto salvato ha un campo `uid` = uid del contatto.
-    const inOthersWallets = await db
-      .collectionGroup("contacts")
-      .where("uid", "==", uid)
-      .get();
-    for (const doc of inOthersWallets.docs) {
-      bulkWriter.delete(doc.ref);
+exports.deleteAccount = onCall(
+  {
+    region: "us-central1",
+    timeoutSeconds: 180,
+    memory: "256MiB",
+    enforceAppCheck: false,
+  },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+      throw new HttpsError(
+        "unauthenticated",
+        "Devi essere autenticato per eliminare l'account."
+      );
     }
 
-    // 4. Richieste di connessione in cui l'utente è mittente o destinatario.
-    const sent = await db.collection("connectionRequests").where("senderUid", "==", uid).get();
-    const received = await db.collection("connectionRequests").where("receiverUid", "==", uid).get();
-    for (const doc of [...sent.docs, ...received.docs]) {
-      bulkWriter.delete(doc.ref);
-    }
+    const db = admin.firestore();
+    const warnings = [];
+    const warn = (step, error) => {
+      console.warn(`deleteAccount [${uid}] ${step}`, error);
+      warnings.push(step);
+    };
 
-    // 5. Dati legati agli eventi: presence, proximityTokens, detections.
-    const events = await db.collection("events").get();
-    for (const eventDoc of events.docs) {
-      const eventRef = db.collection("events").doc(eventDoc.id);
-
-      // presence/{uid}
-      bulkWriter.delete(eventRef.collection("presence").doc(uid));
-
-      // proximityTokens dove uid == uid (la chiave del doc è il token, non l'uid)
-      const tokens = await eventRef.collection("proximityTokens").where("uid", "==", uid).get();
-      for (const t of tokens.docs) {
-        bulkWriter.delete(t.ref);
-      }
-
-      // detections/{uid} + sottocollezione nearby (le mie rilevazioni)
-      await db.recursiveDelete(eventRef.collection("detections").doc(uid), bulkWriter);
-    }
-
-    await bulkWriter.close();
-
-    // 6. Avatar su Storage (best-effort: potrebbe non esistere).
     try {
-      await admin.storage().bucket().file(`avatars/${uid}.jpg`).delete();
-    } catch (e) {
-      if (e.code !== 404) {
-        console.warn(`deleteAccount: avatar non eliminato per ${uid}:`, e.message);
+      // Operazioni limitate e indipendenti: niente scansione di tutti gli eventi,
+      // che può consumare quota e produrre RESOURCE_EXHAUSTED.
+      try {
+        await db.recursiveDelete(db.collection("connections").doc(uid));
+      } catch (error) {
+        warn("connections", error);
       }
+
+      for (const field of ["senderUid", "receiverUid"]) {
+        try {
+          const snap = await db
+            .collection("connectionRequests")
+            .where(field, "==", uid)
+            .limit(500)
+            .get();
+          if (!snap.empty) {
+            const batch = db.batch();
+            snap.docs.forEach((doc) => batch.delete(doc.ref));
+            await batch.commit();
+          }
+        } catch (error) {
+          warn(`connectionRequests:${field}`, error);
+        }
+      }
+
+      try {
+        await db.collection("users").doc(uid).delete();
+      } catch (error) {
+        warn("user-profile", error);
+      }
+
+      try {
+        await admin
+          .storage()
+          .bucket()
+          .file(`avatars/${uid}.jpg`)
+          .delete({ ignoreNotFound: true });
+      } catch (error) {
+        warn("avatar", error);
+      }
+
+      // Auth viene eliminato per ultimo. Da questo punto il client torna al login.
+      try {
+        await admin.auth().deleteUser(uid);
+      } catch (error) {
+        if (error?.code !== "auth/user-not-found") throw error;
+      }
+
+      return { success: true, warnings };
+    } catch (error) {
+      console.error(`deleteAccount [${uid}] errore finale`, error);
+      throw new HttpsError(
+        "internal",
+        error?.message || "Impossibile completare l'eliminazione dell'account."
+      );
     }
-
-    // 7. PER ULTIMO: l'utente Firebase Auth.
-    await admin.auth().deleteUser(uid);
-
-    console.log(`deleteAccount: account ${uid} eliminato completamente.`);
-    return { success: true };
-  } catch (e) {
-    console.error(`deleteAccount: errore eliminazione account ${uid}:`, e);
-    throw new HttpsError("internal", "Impossibile completare l'eliminazione dell'account. Riprova.");
   }
-});
+);
 
 exports.cleanupOldDetections = onSchedule("every 60 minutes", async () => {
   const db = admin.firestore();

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -11,6 +12,19 @@ class BlePermissionsService {
 
   // Alias per chi usa .instance invece di .shared.
   static BlePermissionsService get instance => shared;
+
+  // Cache della versione Android per non interrogare il device ogni volta.
+  int? _androidSdkInt;
+
+  /// Ritorna l'API level di Android (es. 31 = Android 12).
+  /// Su piattaforme non-Android ritorna 0.
+  Future<int> _getAndroidSdkInt() async {
+    if (!Platform.isAndroid) return 0;
+    if (_androidSdkInt != null) return _androidSdkInt!;
+    final info = await DeviceInfoPlugin().androidInfo;
+    _androidSdkInt = info.version.sdkInt;
+    return _androidSdkInt!;
+  }
 
   Future<bool> isBluetoothOn() async {
     if (kIsWeb) return false;
@@ -80,30 +94,36 @@ class BlePermissionsService {
 
   Future<bool> _requestAndroid() async {
     try {
-      // Su Android i permessi BLE cambiano tra versione 11 e 12+.
-      // Chiediamo tutto, ma non blocchiamo il join se qualcosa manca:
-      // su Android 11 i permessi BT runtime non esistono.
+      final sdkInt = await _getAndroidSdkInt();
+
+      // Android 12+ (API 31): il BLE usa i permessi BLUETOOTH_SCAN/ADVERTISE/CONNECT.
+      // La location NON serve e non viene mai concessa (flag neverForLocation nel
+      // manifest), quindi NON va richiesta e NON va inclusa nel check.
+      if (sdkInt >= 31) {
+        final statuses = await [
+          Permission.bluetoothScan,
+          Permission.bluetoothAdvertise,
+          Permission.bluetoothConnect,
+        ].request();
+
+        final ok = statuses.values.every((s) => s.isGranted);
+
+        debugPrint(
+          '[BLE-PERM] Android 12+ permissions: '
+          'scan=${statuses[Permission.bluetoothScan]} '
+          'advertise=${statuses[Permission.bluetoothAdvertise]} '
+          'connect=${statuses[Permission.bluetoothConnect]} -> $ok',
+        );
+
+        return ok;
+      }
+
+      // Android 11 e precedenti (API <= 30): il BLE scan/advertise richiede
+      // solo ACCESS_FINE_LOCATION. I permessi BLUETOOTH_* runtime non esistono.
       final locationStatus = await Permission.locationWhenInUse.request();
-      final scanStatus = await Permission.bluetoothScan.request();
-      final advertiseStatus = await Permission.bluetoothAdvertise.request();
-      final connectStatus = await Permission.bluetoothConnect.request();
+      final ok = locationStatus.isGranted;
 
-      final locationOk = locationStatus.isGranted;
-
-      // Su Android 12+ scan/advertise/connect devono essere tutti granted.
-      // Su Android 11 possono risultare denied ma non è un problema:
-      // il plugin nativo fa il check finale e usa solo Fine Location.
-      final android12PermsOk =
-          scanStatus.isGranted && advertiseStatus.isGranted && connectStatus.isGranted;
-
-      final ok = locationOk && (android12PermsOk ||
-          scanStatus.isDenied || advertiseStatus.isDenied || connectStatus.isDenied);
-
-      debugPrint(
-        '[BLE-PERM] Android permissions: '
-        'location=$locationStatus scan=$scanStatus '
-        'advertise=$advertiseStatus connect=$connectStatus -> $ok',
-      );
+      debugPrint('[BLE-PERM] Android <=11 permissions: location=$locationStatus -> $ok');
 
       return ok;
     } catch (e) {
@@ -121,19 +141,18 @@ class BlePermissionsService {
     }
 
     if (Platform.isAndroid) {
-      final location = await Permission.locationWhenInUse.isGranted;
-      if (!location) return false;
+      final sdkInt = await _getAndroidSdkInt();
 
-      final scan = await Permission.bluetoothScan.status;
-      final advertise = await Permission.bluetoothAdvertise.status;
-      final connect = await Permission.bluetoothConnect.status;
-
-      // Android 12+: se tutti e tre i permessi BT sono ok siamo a posto.
-      if (scan.isGranted && advertise.isGranted && connect.isGranted) return true;
+      // Android 12+: contano SOLO i tre permessi bluetooth. Niente location.
+      if (sdkInt >= 31) {
+        final scan = await Permission.bluetoothScan.isGranted;
+        final advertise = await Permission.bluetoothAdvertise.isGranted;
+        final connect = await Permission.bluetoothConnect.isGranted;
+        return scan && advertise && connect;
+      }
 
       // Android 11 e precedenti: basta la Location.
-      // I permessi BT runtime non esistono qui, ci pensa il plugin Kotlin.
-      return true;
+      return await Permission.locationWhenInUse.isGranted;
     }
 
     return false;
