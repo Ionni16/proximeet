@@ -11,6 +11,7 @@ import '../../services/ble_permissions_service.dart';
 import '../../services/debug_error_service.dart';
 import '../../services/event_session_service.dart';
 import '../../widgets/debug_error_sheet.dart';
+import '../auth/login_screen.dart';
 import '../home/home_screen.dart';
 
 class EventListScreen extends StatefulWidget {
@@ -23,6 +24,7 @@ class EventListScreen extends StatefulWidget {
 class _EventListScreenState extends State<EventListScreen> {
   UserModel? _currentUser;
   bool _joining = false;
+  bool _loggingOut = false;
 
   @override
   void initState() {
@@ -36,6 +38,60 @@ class _EventListScreenState extends State<EventListScreen> {
     final user = await AuthService.instance.getUserProfile(uid);
     if (mounted) setState(() => _currentUser = user);
     await AuthService.instance.saveFcmToken();
+  }
+
+  /// Chiede conferma e, se accettato, esegue il logout e riporta in modo
+  /// deterministico alla schermata di login (svuotando lo stack di navigazione).
+  ///
+  /// Nota: questa schermata viene raggiunta tramite `pushReplacement`, quindi
+  /// il solito StreamBuilder su `authStateChanges` non è più "sopra" nell'albero
+  /// e non basterebbe il `signOut()` a riportare al login: navighiamo a mano.
+  Future<void> _confirmAndLogout() async {
+    if (_loggingOut) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.logout_rounded,
+            size: 36, color: Color(0xFF4D8EF7)),
+        title: const Text('Disconnettersi?'),
+        content: const Text(
+          'Uscirai dal tuo account su questo dispositivo. '
+          'Potrai sempre rientrare con il tuo login.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Esci'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _loggingOut = true);
+    try {
+      await AuthService.instance.logout();
+    } catch (e) {
+      // Anche se la pulizia sessione fallisce, proseguiamo verso il login:
+      // lo stato locale di auth è comunque azzerato dal signOut.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Disconnessione completata. ($e)')),
+        );
+      }
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
+    );
   }
 
   Future<void> _joinEvent(EventModel event) async {
@@ -260,12 +316,21 @@ class _EventListScreenState extends State<EventListScreen> {
                               ),
                             ),
                             const Spacer(),
-                            // Bottone logout
+                            // Bottone logout (con conferma)
                             IconButton(
-                              icon: const Icon(Icons.logout_outlined,
-                                  color: Color(0xFF4A6080), size: 20),
+                              icon: _loggingOut
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Color(0xFF4A6080),
+                                      ),
+                                    )
+                                  : const Icon(Icons.logout_outlined,
+                                      color: Color(0xFF4A6080), size: 20),
                               tooltip: 'Esci',
-                              onPressed: () => AuthService.instance.logout(),
+                              onPressed: _loggingOut ? null : _confirmAndLogout,
                             ),
                           ],
                         ),

@@ -192,7 +192,7 @@ class _SplashScreenState extends State<SplashScreen>
                 builder: (_, __) => CustomPaint(
                   painter: _OrbitPainter(
                     progress: _orbitCtrl.value,
-                    centerY: 0.42,
+                    centerY: 0.5,
                   ),
                 ),
               ),
@@ -221,122 +221,125 @@ class _SplashScreenState extends State<SplashScreen>
               ),
             ),
 
-            // ── Contenuto centrato ────────────────────────────────────────────
-            Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const SizedBox(height: 0),
-
-                // Logo
-                ScaleTransition(
-                  scale: _logoScale,
-                  child: FadeTransition(
-                    opacity: _logoOpacity,
-                    child: AnimatedBuilder(
-                      animation: _pulseCtrl,
-                      builder: (_, child) {
-                        final pulse = _pulseCtrl.value;
-                        return Container(
-                          width: 96,
-                          height: 96,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: const Color(0xFF0D1B30),
-                            border: Border.all(
-                              color: const Color(0xFF4D8EF7)
-                                  .withOpacity(0.25 + 0.2 * pulse),
-                              width: 1.5,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFF1A56DB)
-                                    .withOpacity(0.3 + 0.2 * pulse),
-                                blurRadius: 32 + 16 * pulse,
-                                spreadRadius: 2 + 2 * pulse,
-                              ),
-                              BoxShadow(
-                                color: const Color(0xFF4D8EF7)
-                                    .withOpacity(0.08 + 0.06 * pulse),
-                                blurRadius: 60,
-                                spreadRadius: 8,
-                              ),
-                            ],
+            // ── Logo — concentrico all'orbita, esattamente al centro ──────────
+            ScaleTransition(
+              scale: _logoScale,
+              child: FadeTransition(
+                opacity: _logoOpacity,
+                child: AnimatedBuilder(
+                  animation: _pulseCtrl,
+                  builder: (_, child) {
+                    final pulse = _pulseCtrl.value;
+                    return Container(
+                      width: 96,
+                      height: 96,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: const Color(0xFF0D1B30),
+                        border: Border.all(
+                          color: const Color(0xFF4D8EF7)
+                              .withOpacity(0.25 + 0.2 * pulse),
+                          width: 1.5,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF1A56DB)
+                                .withOpacity(0.3 + 0.2 * pulse),
+                            blurRadius: 32 + 16 * pulse,
+                            spreadRadius: 2 + 2 * pulse,
                           ),
-                          child: child,
-                        );
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: Image.asset(
-                          'assets/icon/splash_logo.png',
-                          fit: BoxFit.contain,
-                        ),
+                          BoxShadow(
+                            color: const Color(0xFF4D8EF7)
+                                .withOpacity(0.08 + 0.06 * pulse),
+                            blurRadius: 60,
+                            spreadRadius: 8,
+                          ),
+                        ],
                       ),
+                      child: child,
+                    );
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Image.asset(
+                      'assets/icon/splash_logo.png',
+                      fit: BoxFit.contain,
                     ),
                   ),
                 ),
+              ),
+            ),
 
-                const SizedBox(height: 28),
-
-                // Titolo
-                SlideTransition(
-                  position: _titleOffset,
-                  child: FadeTransition(
-                    opacity: _titleOpacity,
-                    child: const Text(
-                      'Swaply',
-                      style: TextStyle(
-                        fontSize: 36,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -1.2,
-                        color: Color(0xFFE8F0FE),
-                        height: 1,
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 10),
-
-                // Tagline
-                FadeTransition(
-                  opacity: _taglineOpacity,
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 20,
-                        height: 1,
-                        color: const Color(0xFF4D8EF7).withOpacity(0.4),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Networking di prossimità',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w400,
-                          letterSpacing: 0.8,
-                          color: const Color(0xFF8BA3C7).withOpacity(0.85),
+            // ── Testo (titolo + tagline + loader) — sotto al logo centrato ────
+            Align(
+              alignment: Alignment.center,
+              child: Transform.translate(
+                offset: const Offset(0, 150),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Titolo
+                    SlideTransition(
+                      position: _titleOffset,
+                      child: FadeTransition(
+                        opacity: _titleOpacity,
+                        child: const Text(
+                          'Swaply',
+                          style: TextStyle(
+                            fontSize: 36,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -1.2,
+                            color: Color(0xFFE8F0FE),
+                            height: 1,
+                          ),
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      Container(
-                        width: 20,
-                        height: 1,
-                        color: const Color(0xFF4D8EF7).withOpacity(0.4),
+                    ),
+
+                    const SizedBox(height: 10),
+
+                    // Tagline
+                    FadeTransition(
+                      opacity: _taglineOpacity,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 20,
+                            height: 1,
+                            color: const Color(0xFF4D8EF7).withOpacity(0.4),
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            'Networking di prossimità',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w400,
+                              letterSpacing: 0.8,
+                              color:
+                                  const Color(0xFF8BA3C7).withOpacity(0.85),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Container(
+                            width: 20,
+                            height: 1,
+                            color: const Color(0xFF4D8EF7).withOpacity(0.4),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
+                    ),
 
-                const SizedBox(height: 64),
+                    const SizedBox(height: 40),
 
-                // Indicatore di caricamento — 3 dot pulse sfasati
-                FadeTransition(
-                  opacity: _taglineOpacity,
-                  child: _ThreeDotsLoader(),
+                    // Indicatore di caricamento — 3 dot pulse sfasati
+                    FadeTransition(
+                      opacity: _taglineOpacity,
+                      child: _ThreeDotsLoader(),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
 
             // ── Badge versione in basso ────────────────────────────────────────

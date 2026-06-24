@@ -9,6 +9,7 @@ import '../../services/auth_service.dart';
 import '../../services/event_session_service.dart';
 import '../../services/storage_service.dart';
 import '../../widgets/user_avatar.dart';
+import '../auth/login_screen.dart';
 import '../profile/edit_profile_screen.dart';
 import 'qr_scanner_screen.dart';
 
@@ -113,12 +114,19 @@ class _ProfileContentState extends State<_ProfileContent> {
       await AuthService.instance.logout();
     } catch (e) {
       if (mounted) {
-        setState(() => _loggingOut = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Logout non riuscito: $e')),
+          SnackBar(content: Text('Disconnessione completata. ($e)')),
         );
       }
     }
+
+    // Navigazione esplicita: da dentro un evento lo StreamBuilder auth non è
+    // più nell'albero, quindi riportiamo al login svuotando lo stack.
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      (route) => false,
+    );
   }
 
   /// Mostra il dialog di conferma e, se confermato, elimina l'account.
@@ -168,12 +176,15 @@ class _ProfileContentState extends State<_ProfileContent> {
       // 2. Elimina account + tutti i dati (Cloud Function lato server) e signOut.
       await AuthService.instance.deleteAccount();
 
-      // 3. Lo StreamBuilder su authStateChanges in main.dart riporta da solo
-      //    alla schermata di login: non serve navigare manualmente.
-      //    Mostriamo comunque una conferma se siamo ancora montati.
+      // 3. Da dentro un evento lo StreamBuilder su authStateChanges non è più
+      //    nell'albero, quindi riportiamo esplicitamente al login.
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Account eliminato')),
+        );
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (route) => false,
         );
       }
     } on FirebaseFunctionsException catch (e) {
